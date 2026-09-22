@@ -7,6 +7,7 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
     private let controller: ManagementController
     private let windowControl: WindowControlService
     private let powerControl: PowerControlService
+    private let notificationService: NotificationService?
     private let ownerUID: uid_t
     private let appRequirement: String
 
@@ -14,6 +15,7 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
         controller: ManagementController,
         windowControl: WindowControlService,
         powerControl: PowerControlService,
+        notificationService: NotificationService? = nil,
         trustManifestURL: URL
     ) throws {
         let data = try Data(contentsOf: trustManifestURL)
@@ -23,6 +25,7 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
         self.controller = controller
         self.windowControl = windowControl
         self.powerControl = powerControl
+        self.notificationService = notificationService
         appRequirement = try manifest.appRequirement()
         listener = NSXPCListener(machServiceName: "dev.mactower.daemon")
         super.init()
@@ -40,8 +43,13 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
         guard connection.effectiveUserIdentifier == ownerUID else { return false }
         let peer = WindowAgentPeer(connection: connection)
         let service = ManagementXPCService(
-            handler: DaemonManagementHandler(controller: controller, power: powerControl),
+            handler: DaemonManagementHandler(
+                controller: controller,
+                power: powerControl,
+                notifications: notificationService
+            ),
             windowControl: windowControl,
+            notificationService: notificationService,
             peer: peer
         )
         connection.exportedInterface = NSXPCInterface(with: MacTowerDaemonXPCProtocol.self)
@@ -49,9 +57,13 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
         connection.setCodeSigningRequirement(appRequirement)
         connection.exportedObject = service
         let router = windowControl.router
+        let notificationService = self.notificationService
         let lost: @Sendable () -> Void = {
             peer.invalidate()
-            Task { await router.disconnectAgent(id: peer.id) }
+            Task {
+                await router.disconnectAgent(id: peer.id)
+                await notificationService?.unregisterUserAgent(id: peer.id)
+            }
         }
         connection.invalidationHandler = lost
         connection.interruptionHandler = lost
@@ -63,15 +75,18 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
 private final class ManagementXPCService: NSObject, MacTowerDaemonXPCProtocol, @unchecked Sendable {
     private let handler: DaemonManagementHandler
     private let windowControl: WindowControlService
+    private let notificationService: NotificationService?
     private let peer: WindowAgentPeer
 
     init(
         handler: DaemonManagementHandler,
         windowControl: WindowControlService,
+        notificationService: NotificationService?,
         peer: WindowAgentPeer
     ) {
         self.handler = handler
         self.windowControl = windowControl
+        self.notificationService = notificationService
         self.peer = peer
     }
 
@@ -92,8 +107,10 @@ private final class ManagementXPCService: NSObject, MacTowerDaemonXPCProtocol, @
                 )
                 guard peer.isActive else {
                     await windowControl.router.disconnectAgent(id: peer.id)
+                    await notificationService?.unregisterUserAgent(id: peer.id)
                     throw ManagementControllerError.invalidRequest
                 }
+                await notificationService?.registerUserAgent(peer)
                 reply(try JSONEncoder().encode(await windowControl.status()), nil)
             } catch { reply(nil, "window_agent_rejected") }
         }
@@ -128,11 +145,12 @@ private final class ManagementXPCService: NSObject, MacTowerDaemonXPCProtocol, @
     }
 }
 
-private final class WindowAgentPeer: @unchecked Sendable {
+private final class WindowAgentPeer: NotificationUserAgent, @unchecked Sendable {
     let id = UUID()
     private weak var connection: NSXPCConnection?
     private let lock = NSLock()
     private var active = true
+    private var notificationReplies: [UUID: (NotificationDeliveryState) -> Void] = [:]
 
     init(connection: NSXPCConnection) { self.connection = connection }
 
@@ -145,7 +163,10 @@ private final class WindowAgentPeer: @unchecked Sendable {
     func invalidate() {
         lock.lock()
         active = false
+        let replies = Array(notificationReplies.values)
+        notificationReplies.removeAll()
         lock.unlock()
+        for reply in replies { reply(.failed) }
     }
 
     func cancel() {
@@ -173,5 +194,69 @@ private final class WindowAgentPeer: @unchecked Sendable {
             }
             reply(result)
         }
+    }
+
+    func deliver(_ request: MacNotificationDelivery) async -> NotificationDeliveryState {
+        guard let data = try? JSONEncoder().encode(request), data.count <= 16_384 else {
+            return .failed
+        }
+        return await withCheckedContinuation { continuation in
+            let replyID = UUID()
+            guard registerNotificationReply(replyID, continuation: continuation) else { return }
+            guard let connection,
+                let proxy = connection.remoteObjectProxyWithErrorHandler({ [weak self] _ in
+                    self?.finishNotificationReply(replyID, state: .failed)
+                }) as? MacTowerWindowAgentXPCProtocol
+            else {
+                finishNotificationReply(replyID, state: .failed)
+                return
+            }
+            proxy.deliverUserNotification(data) { [weak self] data, error in
+                guard error == nil, let data, data.count <= 4_096,
+                    let state = try? JSONDecoder().decode(
+                        NotificationDeliveryState.self,
+                        from: data
+                    )
+                else {
+                    self?.finishNotificationReply(replyID, state: .failed)
+                    return
+                }
+                self?.finishNotificationReply(replyID, state: state)
+            }
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(3))
+                self?.finishNotificationReply(replyID, state: .failed)
+            }
+        }
+    }
+
+    func remove(eventID: UUID) async {
+        guard isActive, let connection,
+            let data = try? JSONEncoder().encode(eventID), data.count <= 16_384,
+            let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in })
+                as? MacTowerWindowAgentXPCProtocol
+        else { return }
+        proxy.removeUserNotification(data) { _, _ in }
+    }
+
+    private func registerNotificationReply(
+        _ id: UUID,
+        continuation: CheckedContinuation<NotificationDeliveryState, Never>
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard active else {
+            continuation.resume(returning: .failed)
+            return false
+        }
+        notificationReplies[id] = { state in continuation.resume(returning: state) }
+        return true
+    }
+
+    private func finishNotificationReply(_ id: UUID, state: NotificationDeliveryState) {
+        lock.lock()
+        let reply = notificationReplies.removeValue(forKey: id)
+        lock.unlock()
+        reply?(state)
     }
 }

@@ -16,6 +16,7 @@ protocol NotificationUserAgent: Sendable {
 }
 
 protocol NotificationPanelControlling: Sendable {
+    func pair() async throws -> NSPanelPairingResult
     func wake(token: String) async throws
     func play(sound: NSPanelSound, token: String) async throws
 }
@@ -31,6 +32,18 @@ protocol NotificationServiceControlling: Sendable {
     func stop() async
     func setMQTTPublisher(_ publisher: (any NotificationMQTTPublishing)?) async
     func receiveMQTT(topic: String, payload: Data, retained: Bool, now: Date) async
+    func registerUserAgent(_ agent: (any NotificationUserAgent)?) async
+    func unregisterUserAgent(id: UUID) async
+    func acknowledge(
+        eventID: UUID, actor: NotificationAcknowledgementActor, now: Date
+    ) async throws
+    func replaceConfiguration(_ configuration: NotificationConfiguration) async throws
+    func configuration() async -> NotificationConfiguration
+    func summary() async -> NotificationSummary
+    func history(limit: Int, before: NotificationHistoryCursor?) async -> NotificationHistoryPage
+    func pairNSPanel() async throws -> NSPanelPairingStatus
+    func clearNSPanelToken() async throws
+    func testChannel(_ channel: NotificationTestChannel) async -> NotificationDeliveryState
 }
 
 actor NotificationService: NotificationServiceControlling, NotificationStopping {
@@ -45,7 +58,8 @@ actor NotificationService: NotificationServiceControlling, NotificationStopping 
     private let logger = Logger(subsystem: "dev.mactower", category: "notifications")
     private let engine: NotificationEngine
     private let planner: NotificationMQTTPlanner
-    private let panelToken: String?
+    private let privateStorage: PrivateFileStore?
+    private var panelToken: String?
     private let panelClientFactory: PanelClientFactory
     private var mqttPublisher: (any NotificationMQTTPublishing)?
     private var userAgent: (any NotificationUserAgent)?
@@ -67,6 +81,7 @@ actor NotificationService: NotificationServiceControlling, NotificationStopping 
         }
         engine = try NotificationEngine(store: FileNotificationStateStore(root: root))
         planner = NotificationMQTTPlanner(topicPrefix: serviceConfiguration.mqtt.topicPrefix)
+        privateStorage = storage
         panelToken = rawToken.flatMap { $0.isEmpty ? nil : $0 }
         panelClientFactory = { NSPanelClient.live(configuration: $0) }
     }
@@ -75,10 +90,12 @@ actor NotificationService: NotificationServiceControlling, NotificationStopping 
         store: any NotificationStateStore,
         topicPrefix: String,
         panelToken: String?,
+        privateStorage: PrivateFileStore? = nil,
         panelClientFactory: @escaping PanelClientFactory
     ) throws {
         engine = try NotificationEngine(store: store)
         planner = NotificationMQTTPlanner(topicPrefix: topicPrefix)
+        self.privateStorage = privateStorage
         self.panelToken = panelToken
         self.panelClientFactory = panelClientFactory
     }
@@ -124,6 +141,11 @@ actor NotificationService: NotificationServiceControlling, NotificationStopping 
         userAgent = agent
         guard agent != nil else { return }
         await drainPending(channels: [.mac])
+    }
+
+    func unregisterUserAgent(id: UUID) async {
+        guard userAgent?.id == id else { return }
+        userAgent = nil
     }
 
     func receiveMQTT(
@@ -198,6 +220,80 @@ actor NotificationService: NotificationServiceControlling, NotificationStopping 
         before: NotificationHistoryCursor?
     ) async -> NotificationHistoryPage {
         await engine.history(limit: limit, before: before)
+    }
+
+    func pairNSPanel() async throws -> NSPanelPairingStatus {
+        guard let panelConfiguration = (await engine.configuration()).panel else {
+            throw NotificationConfigurationError.invalidPanelHost
+        }
+        switch try await panelClientFactory(panelConfiguration).pair() {
+        case .pressDone:
+            return .pressDone
+        case .paired(let token):
+            guard let privateStorage else {
+                throw PrivateFileStoreError.ioFailure
+            }
+            try privateStorage.write(Data(token.utf8), named: "nspanel-token")
+            panelToken = token
+            return .paired
+        }
+    }
+
+    func clearNSPanelToken() async throws {
+        guard let privateStorage else {
+            panelToken = nil
+            return
+        }
+        try privateStorage.remove(named: "nspanel-token")
+        panelToken = nil
+    }
+
+    func testChannel(_ channel: NotificationTestChannel) async -> NotificationDeliveryState {
+        let eventID = UUID()
+        let delivery = MacNotificationDelivery(
+            eventID: eventID,
+            severity: .critical,
+            title: "MacTower test",
+            message: "Notification channel test"
+        )
+        switch channel {
+        case .mac:
+            guard let userAgent else { return .failed }
+            return await userAgent.deliver(delivery)
+        case .panelText:
+            guard let mqttPublisher else { return .failed }
+            let record = testRecord(delivery)
+            do {
+                try await mqttPublisher.publish([
+                    planner.panelPublication(record, acknowledgementEnabled: false)
+                ])
+                return .handedOff
+            } catch {
+                return .failed
+            }
+        case .panelWake, .panelSound:
+            guard let panelToken,
+                let panelConfiguration = (await engine.configuration()).panel
+            else { return .failed }
+            let client = panelClientFactory(panelConfiguration)
+            do {
+                if channel == .panelWake {
+                    try await client.wake(token: panelToken)
+                } else {
+                    try await client.play(
+                        sound: NSPanelSound(
+                            name: .alert1,
+                            volume: 50,
+                            countdownSeconds: 3
+                        ),
+                        token: panelToken
+                    )
+                }
+                return .handedOff
+            } catch {
+                return .failed
+            }
+        }
     }
 
     private func runDueEffects() async {
@@ -385,5 +481,24 @@ actor NotificationService: NotificationServiceControlling, NotificationStopping 
         for delivery in deliveries {
             await execute(delivery, attemptedAt: Date())
         }
+    }
+
+    private func testRecord(_ delivery: MacNotificationDelivery) -> NotificationRecord {
+        let now = Date()
+        return NotificationRecord(
+            event: NotificationEvent(
+                eventID: delivery.eventID,
+                sourceID: NotificationSourceID(rawValue: "mactower.test")!,
+                severity: delivery.severity,
+                title: delivery.title,
+                message: delivery.message,
+                createdAt: now
+            ),
+            firstSeenAt: now,
+            lastSeenAt: now,
+            isActive: false,
+            deliveryPlan: NotificationDeliveryPlan(channels: [.panel]),
+            deliveries: [.panel: NotificationChannelDelivery(state: .queued)]
+        )
     }
 }

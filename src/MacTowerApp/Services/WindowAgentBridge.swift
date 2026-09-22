@@ -12,6 +12,7 @@ final class WindowAgentBridge: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     private let controller: WindowController
+    private let notificationController: MacNotificationController
     private var connection: NSXPCConnection?
     private var heartbeatTask: Task<Void, Never>?
     private let replies = XPCReplyLedger()
@@ -21,8 +22,9 @@ final class WindowAgentBridge: ObservableObject {
     var remoteEnabled: Bool { session.remoteEnabled }
     private var connectionID: UUID? { session.connectionID }
 
-    init(controller: WindowController) {
+    init(controller: WindowController, notificationController: MacNotificationController) {
         self.controller = controller
+        self.notificationController = notificationController
     }
 
     func start() {
@@ -206,6 +208,48 @@ final class WindowAgentBridge: ObservableObject {
         cancelRemoteCommand(code: .cancelled)
     }
 
+    fileprivate func deliverUserNotification(
+        _ data: Data,
+        connectionID id: UUID,
+        reply: @escaping @Sendable (Data?, String?) -> Void
+    ) async {
+        guard connectionID == id, data.count <= 16_384,
+            let request = try? JSONDecoder().decode(MacNotificationDelivery.self, from: data)
+        else {
+            reply(nil, "invalid_notification")
+            return
+        }
+        let state = await notificationController.deliver(request)
+        guard connectionID == id else {
+            reply(nil, "stale_connection")
+            return
+        }
+        guard let encoded = try? JSONEncoder().encode(state), encoded.count <= 4_096 else {
+            reply(nil, "encoding_failed")
+            return
+        }
+        reply(encoded, nil)
+    }
+
+    fileprivate func removeUserNotification(
+        _ data: Data,
+        connectionID id: UUID,
+        reply: @escaping @Sendable (Data?, String?) -> Void
+    ) async {
+        guard connectionID == id, data.count <= 16_384,
+            let eventID = try? JSONDecoder().decode(UUID.self, from: data)
+        else {
+            reply(nil, "invalid_notification")
+            return
+        }
+        await notificationController.remove(eventID: eventID)
+        guard connectionID == id else {
+            reply(nil, "stale_connection")
+            return
+        }
+        reply(Data("{}".utf8), nil)
+    }
+
     private func finishRemoteCommand(
         _ id: UUID, result: WindowMoveResult,
         reply: @escaping @Sendable (Data?, String?) -> Void
@@ -274,6 +318,40 @@ private final class WindowAgentEndpoint: NSObject, MacTowerWindowAgentXPCProtoco
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.bridge?.cancelRemoteCommands(connectionID: self.connectionID)
+        }
+    }
+
+    nonisolated func deliverUserNotification(
+        _ request: Data,
+        withReply reply: @escaping @Sendable (Data?, String?) -> Void
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, let bridge = self.bridge else {
+                reply(nil, "unavailable")
+                return
+            }
+            await bridge.deliverUserNotification(
+                request,
+                connectionID: self.connectionID,
+                reply: reply
+            )
+        }
+    }
+
+    nonisolated func removeUserNotification(
+        _ request: Data,
+        withReply reply: @escaping @Sendable (Data?, String?) -> Void
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, let bridge = self.bridge else {
+                reply(nil, "unavailable")
+                return
+            }
+            await bridge.removeUserNotification(
+                request,
+                connectionID: self.connectionID,
+                reply: reply
+            )
         }
     }
 }

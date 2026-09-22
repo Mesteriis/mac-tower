@@ -147,4 +147,8 @@ public enum WindowControlContractError: Error {
     func moveActiveWindow(
         _ request: Data, withReply reply: @escaping @Sendable (Data?, String?) -> Void)
     func cancelRemoteWindowCommands()
+    func deliverUserNotification(
+        _ request: Data, withReply reply: @escaping @Sendable (Data?, String?) -> Void)
+    func removeUserNotification(
+        _ request: Data, withReply reply: @escaping @Sendable (Data?, String?) -> Void)
 }

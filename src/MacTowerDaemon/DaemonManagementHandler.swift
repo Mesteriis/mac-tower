@@ -23,10 +23,16 @@ extension PowerControlService: PowerControlServicing {}
 struct DaemonManagementHandler: Sendable {
     private let controller: any ManagementControlling
     private let power: any PowerControlServicing
+    private let notifications: (any NotificationServiceControlling)?
 
-    init(controller: any ManagementControlling, power: any PowerControlServicing) {
+    init(
+        controller: any ManagementControlling,
+        power: any PowerControlServicing,
+        notifications: (any NotificationServiceControlling)? = nil
+    ) {
         self.controller = controller
         self.power = power
+        self.notifications = notifications
     }
 
     func handle(_ data: Data) async throws -> Data {
@@ -45,7 +51,8 @@ struct DaemonManagementHandler: Sendable {
                     configuration: base.configuration,
                     accounts: base.accounts,
                     activeCodexOAuthAccountID: base.activeCodexOAuthAccountID,
-                    powerControl: power.status()
+                    powerControl: power.status(),
+                    notificationSummary: await notifications?.summary()
                 ))
         case .replaceConfiguration:
             try await controller.replaceConfiguration(
@@ -81,6 +88,48 @@ struct DaemonManagementHandler: Sendable {
             let request = try decoder.decode(
                 SetPowerModeRequest.self, from: requiredPayload(envelope))
             return try encoder.encode(power.setMode(request.mode))
+        case .replaceNotificationConfiguration:
+            let notifications = try requiredNotifications()
+            try await notifications.replaceConfiguration(
+                try decoder.decode(
+                    NotificationConfiguration.self,
+                    from: try notificationPayload(envelope)
+                ))
+            return Data("{}".utf8)
+        case .notificationHistory:
+            let notifications = try requiredNotifications()
+            let request = try decoder.decode(
+                NotificationHistoryRequest.self,
+                from: try notificationPayload(envelope)
+            )
+            guard (1...100).contains(request.limit) else {
+                throw ManagementControllerError.invalidRequest
+            }
+            return try encoder.encode(
+                await notifications.history(limit: request.limit, before: request.before))
+        case .acknowledgeNotification:
+            let notifications = try requiredNotifications()
+            let request = try decoder.decode(
+                AcknowledgeNotificationRequest.self,
+                from: try notificationPayload(envelope)
+            )
+            try await notifications.acknowledge(
+                eventID: request.eventID,
+                actor: .mac,
+                now: Date()
+            )
+            return Data("{}".utf8)
+        case .pairNSPanel:
+            return try encoder.encode(try await requiredNotifications().pairNSPanel())
+        case .clearNSPanelToken:
+            try await requiredNotifications().clearNSPanelToken()
+            return Data("{}".utf8)
+        case .testNotificationChannel:
+            let request = try decoder.decode(
+                TestNotificationChannelRequest.self,
+                from: try notificationPayload(envelope)
+            )
+            return try encoder.encode(await requiredNotifications().testChannel(request.channel))
         }
     }
 
@@ -88,4 +137,19 @@ struct DaemonManagementHandler: Sendable {
         guard let payload = envelope.payload else { throw ManagementControllerError.invalidRequest }
         return payload
     }
+
+    private func notificationPayload(_ envelope: ManagementEnvelope) throws -> Data {
+        let payload = try requiredPayload(envelope)
+        guard payload.count <= 65_536 else { throw ManagementControllerError.invalidRequest }
+        return payload
+    }
+
+    private func requiredNotifications() throws -> any NotificationServiceControlling {
+        guard let notifications else { throw NotificationManagementServiceError.unavailable }
+        return notifications
+    }
+}
+
+enum NotificationManagementServiceError: Error, Equatable {
+    case unavailable
 }

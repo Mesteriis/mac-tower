@@ -83,6 +83,7 @@ struct MacTowerDaemon {
                 controller: controller,
                 windowControl: windowControl,
                 powerControl: powerControl,
+                notificationService: notificationService,
                 trustManifestURL: URL(
                     fileURLWithPath: "/Library/Preferences/dev.mactower.trust.json")
             )

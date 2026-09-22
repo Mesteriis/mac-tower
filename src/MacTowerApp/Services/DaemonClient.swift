@@ -24,6 +24,8 @@ final class DaemonClient: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var powerPresentation = PowerModePresentationState()
     @Published var errorMessage: String?
+    @Published private(set) var notificationHistory: [NotificationRecord] = []
+    @Published private(set) var panelPairingStatus: NSPanelPairingStatus?
     private let replies = XPCReplyLedger()
 
     var powerStatus: PowerControlStatus? { powerPresentation.confirmedStatus }
@@ -175,6 +177,70 @@ final class DaemonClient: ObservableObject {
         isBusy = false
     }
 
+    func saveNotificationConfiguration(_ configuration: NotificationConfiguration) async {
+        await run {
+            _ = try await self.perform(
+                operation: .replaceNotificationConfiguration,
+                payload: configuration,
+                response: EmptyResponse.self
+            )
+            try await self.loadStatus()
+        }
+    }
+
+    func loadNotificationHistory(limit: Int = 50, before: NotificationHistoryCursor? = nil) async {
+        await run {
+            let page = try await self.perform(
+                operation: .notificationHistory,
+                payload: try NotificationHistoryRequest(limit: limit, before: before),
+                response: NotificationHistoryPage.self
+            )
+            self.notificationHistory = page.records
+        }
+    }
+
+    func acknowledgeNotification(eventID: UUID) async {
+        await run {
+            _ = try await self.perform(
+                operation: .acknowledgeNotification,
+                payload: AcknowledgeNotificationRequest(eventID: eventID),
+                response: EmptyResponse.self
+            )
+            try await self.loadStatus()
+        }
+    }
+
+    func pairNSPanel() async {
+        await run {
+            self.panelPairingStatus = try await self.perform(
+                operation: .pairNSPanel,
+                response: NSPanelPairingStatus.self
+            )
+            try await self.loadStatus()
+        }
+    }
+
+    func clearNSPanelToken() async {
+        await run {
+            _ = try await self.perform(
+                operation: .clearNSPanelToken,
+                response: EmptyResponse.self
+            )
+            self.panelPairingStatus = nil
+            try await self.loadStatus()
+        }
+    }
+
+    func testNotificationChannel(_ channel: NotificationTestChannel) async {
+        await run {
+            _ = try await self.perform(
+                operation: .testNotificationChannel,
+                payload: TestNotificationChannelRequest(channel: channel),
+                response: NotificationDeliveryState.self
+            )
+        }
+    }
+
     func stop() {
         replies.disconnect()
     }
@@ -269,5 +335,7 @@ final class DaemonClient: ObservableObject {
         return connection
     }
 }
+
+extension DaemonClient: NotificationAcknowledging {}
 
 private struct EmptyResponse: Codable {}

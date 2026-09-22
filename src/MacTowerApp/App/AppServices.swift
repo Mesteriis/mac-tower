@@ -5,7 +5,14 @@ final class AppServices {
     let windows = WindowController()
     let loginItem = LoginItemController()
     let daemon = DaemonClient()
-    lazy var windowBridge = WindowAgentBridge(controller: windows)
+    lazy var notifications = MacNotificationController(
+        center: SystemUserNotificationCenter(),
+        acknowledger: daemon
+    )
+    lazy var windowBridge = WindowAgentBridge(
+        controller: windows,
+        notificationController: notifications
+    )
     private var menuCapture: MenuTargetCapture?
 
     func start() {

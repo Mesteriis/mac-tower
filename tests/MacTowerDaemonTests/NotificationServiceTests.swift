@@ -155,6 +155,30 @@ struct NotificationServiceTests {
         #expect(store.saveCount == 0)
     }
 
+    @Test("Pairing exposes no token and reports paired only after durable storage")
+    func pairingStorage() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "mactower-pairing-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let privateStorage = try PrivateFileStore(root: root)
+        let trace = NotificationTrace()
+        let panel = PairingNotificationPanel(token: "secret-panel-token")
+        let service = try NotificationService(
+            store: TracingNotificationStore(state: configuredState(), trace: trace),
+            topicPrefix: "tower",
+            panelToken: nil,
+            privateStorage: privateStorage,
+            panelClientFactory: { _ in panel }
+        )
+
+        #expect(try await service.pairNSPanel() == .paired)
+        #expect(try privateStorage.read(named: "nspanel-token") == Data("secret-panel-token".utf8))
+        #expect((await service.summary()).panelTokenPresent)
+        try await service.clearNSPanelToken()
+        #expect(try privateStorage.read(named: "nspanel-token") == nil)
+        #expect(!(await service.summary()).panelTokenPresent)
+    }
+
     private func configuredState(records: [NotificationRecord] = []) -> NotificationPersistentState
     {
         let route = NotificationRoute(
@@ -313,6 +337,10 @@ private actor RecordingNotificationPanel: NotificationPanelControlling {
         remainingWakeFailures = wakeFailures
     }
 
+    func pair() async throws -> NSPanelPairingResult {
+        .pressDone
+    }
+
     func wake(token: String) async throws {
         wakeCount += 1
         trace.append("panel:wake")
@@ -326,6 +354,14 @@ private actor RecordingNotificationPanel: NotificationPanelControlling {
         soundCount += 1
         trace.append("panel:sound")
     }
+}
+
+private actor PairingNotificationPanel: NotificationPanelControlling {
+    let token: String
+    init(token: String) { self.token = token }
+    func pair() async throws -> NSPanelPairingResult { .paired(token: token) }
+    func wake(token: String) async throws {}
+    func play(sound: NSPanelSound, token: String) async throws {}
 }
 
 private struct RecordingNotificationStop: NotificationStopping {

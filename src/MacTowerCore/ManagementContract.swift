@@ -9,6 +9,12 @@ public enum ManagementOperation: String, Codable, Sendable {
     case linkClaudeProfile = "link_claude_profile"
     case removeAccount = "remove_account"
     case setPowerMode = "set_power_mode"
+    case replaceNotificationConfiguration = "replace_notification_configuration"
+    case notificationHistory = "notification_history"
+    case acknowledgeNotification = "acknowledge_notification"
+    case pairNSPanel = "pair_nspanel"
+    case clearNSPanelToken = "clear_nspanel_token"
+    case testNotificationChannel = "test_notification_channel"
 }
 
 public enum PowerMode: String, Codable, CaseIterable, Equatable, Sendable {
@@ -49,6 +55,59 @@ public struct SetPowerModeRequest: Codable, Equatable, Sendable {
     public init(mode: PowerMode) {
         self.mode = mode
     }
+}
+
+public struct NotificationHistoryRequest: Codable, Equatable, Sendable {
+    public let limit: Int
+    public let before: NotificationHistoryCursor?
+
+    public init(limit: Int, before: NotificationHistoryCursor? = nil) throws {
+        guard (1...100).contains(limit) else {
+            throw NotificationManagementRequestError.invalidHistoryLimit
+        }
+        self.limit = limit
+        self.before = before
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            limit: container.decode(Int.self, forKey: .limit),
+            before: container.decodeIfPresent(NotificationHistoryCursor.self, forKey: .before)
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case limit
+        case before
+    }
+}
+
+public struct AcknowledgeNotificationRequest: Codable, Equatable, Sendable {
+    public let eventID: UUID
+
+    public init(eventID: UUID) {
+        self.eventID = eventID
+    }
+}
+
+public enum NotificationTestChannel: String, Codable, CaseIterable, Sendable {
+    case mac
+    case panelText = "panel_text"
+    case panelWake = "panel_wake"
+    case panelSound = "panel_sound"
+}
+
+public struct TestNotificationChannelRequest: Codable, Equatable, Sendable {
+    public let channel: NotificationTestChannel
+
+    public init(channel: NotificationTestChannel) {
+        self.channel = channel
+    }
+}
+
+public enum NotificationManagementRequestError: Error, Equatable, Sendable {
+    case invalidHistoryLimit
 }
 
 public struct ManagementEnvelope: Codable, Sendable {
@@ -250,6 +309,7 @@ public struct DaemonStatus: Codable, Sendable {
     public let accounts: [AccountRegistration]
     public let activeCodexOAuthAccountID: AccountID?
     public let powerControl: PowerControlStatus?
+    public let notificationSummary: NotificationSummary?
 
     public init(
         running: Bool,
@@ -258,7 +318,8 @@ public struct DaemonStatus: Codable, Sendable {
         configuration: ServiceConfiguration,
         accounts: [AccountRegistration],
         activeCodexOAuthAccountID: AccountID? = nil,
-        powerControl: PowerControlStatus? = nil
+        powerControl: PowerControlStatus? = nil,
+        notificationSummary: NotificationSummary? = nil
     ) {
         self.running = running
         self.httpEnabled = httpEnabled
@@ -267,6 +328,7 @@ public struct DaemonStatus: Codable, Sendable {
         self.accounts = accounts
         self.activeCodexOAuthAccountID = activeCodexOAuthAccountID
         self.powerControl = powerControl
+        self.notificationSummary = notificationSummary
     }
 }
 
