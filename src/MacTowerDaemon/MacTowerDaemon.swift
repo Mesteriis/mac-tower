@@ -2,6 +2,7 @@ import Darwin
 import Dispatch
 import Foundation
 import MacTowerCore
+import MacTowerPowerControl
 import MacTowerTransport
 import OSLog
 
@@ -45,6 +46,8 @@ struct MacTowerDaemon {
 
         let runtime: DaemonNetworkRuntime
         let xpcServer: DaemonXPCServer
+        let powerControl: PowerControlService
+        let lifecycle: DaemonLifecycle
         do {
             let root = URL(
                 fileURLWithPath: "/Library/Application Support/MacTower",
@@ -52,14 +55,25 @@ struct MacTowerDaemon {
             )
             let controller = try ManagementController(root: root)
             let windowControl = try WindowControlService(root: root)
+            do {
+                powerControl = try PowerControlService(root: root)
+            } catch {
+                powerControl = PowerControlService(
+                    store: UnavailablePowerModeStore(),
+                    backend: IOKitPowerAssertionBackend()
+                )
+                logger.error("Power settings unavailable; running without sleep assertions.")
+            }
             runtime = try DaemonNetworkRuntime(
                 root: root, controller: controller, windowControl: windowControl)
             xpcServer = try DaemonXPCServer(
                 controller: controller,
                 windowControl: windowControl,
+                powerControl: powerControl,
                 trustManifestURL: URL(
                     fileURLWithPath: "/Library/Preferences/dev.mactower.trust.json")
             )
+            lifecycle = DaemonLifecycle(power: powerControl, network: runtime)
             xpcServer.start()
             try runtime.start()
         } catch {
@@ -74,7 +88,7 @@ struct MacTowerDaemon {
         let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         terminationSource.setEventHandler {
             Task {
-                await runtime.stop()
+                await lifecycle.stop()
                 logger.info("Daemon stopping after SIGTERM.")
                 exit(EXIT_SUCCESS)
             }
@@ -83,7 +97,7 @@ struct MacTowerDaemon {
         let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         interruptSource.setEventHandler {
             Task {
-                await runtime.stop()
+                await lifecycle.stop()
                 logger.info("Daemon stopping after SIGINT.")
                 exit(EXIT_SUCCESS)
             }
@@ -94,7 +108,9 @@ struct MacTowerDaemon {
         logger.info("Daemon started.")
 
         // Keep signal sources alive while dispatch sleeps until an event arrives.
-        withExtendedLifetime((terminationSource, interruptSource, runtime, xpcServer)) {
+        withExtendedLifetime(
+            (terminationSource, interruptSource, runtime, xpcServer, powerControl, lifecycle)
+        ) {
             dispatchMain()
         }
     }
@@ -102,4 +118,11 @@ struct MacTowerDaemon {
     private static func writeError(_ message: String) {
         FileHandle.standardError.write(Data("mac-tower-daemon: \(message)\n".utf8))
     }
+}
+
+private struct UnavailablePowerModeStore: PowerModeStore {
+    private enum Failure: Error { case unavailable }
+
+    func load() throws -> PowerMode? { throw Failure.unavailable }
+    func save(_ mode: PowerMode) throws { throw Failure.unavailable }
 }

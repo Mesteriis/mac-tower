@@ -1,15 +1,20 @@
 import Foundation
 import MacTowerCore
+import MacTowerPowerControl
 
 final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
     private let listener: NSXPCListener
     private let controller: ManagementController
     private let windowControl: WindowControlService
+    private let powerControl: PowerControlService
     private let ownerUID: uid_t
     private let appRequirement: String
 
     init(
-        controller: ManagementController, windowControl: WindowControlService, trustManifestURL: URL
+        controller: ManagementController,
+        windowControl: WindowControlService,
+        powerControl: PowerControlService,
+        trustManifestURL: URL
     ) throws {
         let data = try Data(contentsOf: trustManifestURL)
         let manifest = try JSONDecoder().decode(TrustManifest.self, from: data)
@@ -17,6 +22,7 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
         ownerUID = manifest.ownerUID
         self.controller = controller
         self.windowControl = windowControl
+        self.powerControl = powerControl
         appRequirement = try manifest.appRequirement()
         listener = NSXPCListener(machServiceName: "dev.mactower.daemon")
         super.init()
@@ -34,7 +40,10 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
         guard connection.effectiveUserIdentifier == ownerUID else { return false }
         let peer = WindowAgentPeer(connection: connection)
         let service = ManagementXPCService(
-            controller: controller, windowControl: windowControl, peer: peer)
+            handler: DaemonManagementHandler(controller: controller, power: powerControl),
+            windowControl: windowControl,
+            peer: peer
+        )
         connection.exportedInterface = NSXPCInterface(with: MacTowerDaemonXPCProtocol.self)
         connection.remoteObjectInterface = NSXPCInterface(with: MacTowerWindowAgentXPCProtocol.self)
         connection.setCodeSigningRequirement(appRequirement)
@@ -52,14 +61,16 @@ final class DaemonXPCServer: NSObject, NSXPCListenerDelegate {
 }
 
 private final class ManagementXPCService: NSObject, MacTowerDaemonXPCProtocol, @unchecked Sendable {
-    private let controller: ManagementController
+    private let handler: DaemonManagementHandler
     private let windowControl: WindowControlService
     private let peer: WindowAgentPeer
 
     init(
-        controller: ManagementController, windowControl: WindowControlService, peer: WindowAgentPeer
+        handler: DaemonManagementHandler,
+        windowControl: WindowControlService,
+        peer: WindowAgentPeer
     ) {
-        self.controller = controller
+        self.handler = handler
         self.windowControl = windowControl
         self.peer = peer
     }
@@ -113,52 +124,7 @@ private final class ManagementXPCService: NSObject, MacTowerDaemonXPCProtocol, @
     }
 
     private func handle(_ data: Data) async throws -> Data {
-        guard data.count <= 1_048_576 else { throw ManagementControllerError.invalidRequest }
-        let decoder = JSONDecoder()
-        let encoder = JSONEncoder()
-        let envelope = try decoder.decode(ManagementEnvelope.self, from: data)
-        switch envelope.operation {
-        case .status:
-            return try encoder.encode(await controller.status())
-        case .replaceConfiguration:
-            let payload = try requiredPayload(envelope)
-            let request = try decoder.decode(ReplaceConfigurationRequest.self, from: payload)
-            try await controller.replaceConfiguration(request)
-            return Data("{}".utf8)
-        case .addDeepSeekAccount:
-            try await controller.addDeepSeek(
-                try decoder.decode(
-                    AddDeepSeekAccountRequest.self, from: requiredPayload(envelope)))
-            return Data("{}".utf8)
-        case .startCodexOAuth:
-            let response = try await controller.startCodexOAuth(
-                try decoder.decode(
-                    StartCodexOAuthRequest.self, from: requiredPayload(envelope)))
-            return try encoder.encode(response)
-        case .cancelCodexOAuth:
-            await controller.cancelCodexOAuth(
-                try decoder.decode(
-                    CancelCodexOAuthRequest.self, from: requiredPayload(envelope)))
-            return Data("{}".utf8)
-        case .linkClaudeProfile:
-            try await controller.linkClaude(
-                try decoder.decode(
-                    LinkClaudeProfileRequest.self, from: requiredPayload(envelope)))
-            return Data("{}".utf8)
-        case .removeAccount:
-            try await controller.removeAccount(
-                try decoder.decode(
-                    RemoveAccountRequest.self, from: requiredPayload(envelope)))
-            return Data("{}".utf8)
-        case .setPowerMode:
-            // The daemon implementation is added with the power assertion owner.
-            throw ManagementControllerError.invalidRequest
-        }
-    }
-
-    private func requiredPayload(_ envelope: ManagementEnvelope) throws -> Data {
-        guard let payload = envelope.payload else { throw ManagementControllerError.invalidRequest }
-        return payload
+        try await handler.handle(data)
     }
 }
 

@@ -18,5 +18,6 @@ final class AppServices {
         menuCapture?.stop()
         menuCapture = nil
         windowBridge.stop()
+        daemon.stop()
     }
 }

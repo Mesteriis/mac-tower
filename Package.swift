@@ -72,5 +72,10 @@ let package = Package(
             dependencies: ["MacTowerCore", "MacTowerPowerControl"],
             path: "tests/MacTowerPowerControlTests"
         ),
+        .testTarget(
+            name: "MacTowerDaemonTests",
+            dependencies: ["MacTowerCore", "MacTowerDaemon", "MacTowerPowerControl"],
+            path: "tests/MacTowerDaemonTests"
+        ),
     ]
 )

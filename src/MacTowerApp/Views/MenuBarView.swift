@@ -1,4 +1,5 @@
 import AppKit
+import MacTowerCore
 import MacTowerWindowControl
 import SwiftUI
 
@@ -38,6 +39,28 @@ struct MenuBarView: View {
 
         Divider()
 
+        Menu("Sleep mode") {
+            ForEach(PowerMode.allCases, id: \.self) { mode in
+                if daemon.powerStatus?.requestedMode == mode {
+                    Button {
+                        Task { await daemon.setPowerMode(mode) }
+                    } label: {
+                        Label(mode.displayName, systemImage: "checkmark")
+                    }
+                } else {
+                    Button(mode.displayName) {
+                        Task { await daemon.setPowerMode(mode) }
+                    }
+                }
+            }
+        }
+        .disabled(daemon.powerStatus == nil || daemon.isPowerModeBusy || daemon.isBusy)
+        if let issue = daemon.powerStatus?.issue {
+            Text(issue.explanation).foregroundStyle(.secondary)
+        }
+
+        Divider()
+
         Button("Settings…", systemImage: "gearshape") {
             NSApp.activate(ignoringOtherApps: true)
             openSettings()
@@ -50,7 +73,7 @@ struct MenuBarView: View {
             NSApp.terminate(nil)
         }
         .keyboardShortcut("q")
-        .task { await daemon.refresh() }
+        .onAppear { Task { await daemon.refresh() } }
     }
 
     private func shortTitle(_ title: String) -> String {

@@ -22,6 +22,7 @@ struct SettingsView: View {
                 .tabItem { Label("Windows", systemImage: "macwindow") }
 
             Form {
+                PowerSettingsView(daemon: daemon)
                 Section("Menu bar") {
                     Toggle("Show app name", isOn: $showMenuBarTitle)
                 }

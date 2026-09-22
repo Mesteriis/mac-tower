@@ -22,7 +22,12 @@ enum DaemonClientError: LocalizedError {
 final class DaemonClient: ObservableObject {
     @Published private(set) var status: DaemonStatus?
     @Published private(set) var isBusy = false
+    @Published private(set) var powerPresentation = PowerModePresentationState()
     @Published var errorMessage: String?
+    private let replies = XPCReplyLedger()
+
+    var powerStatus: PowerControlStatus? { powerPresentation.confirmedStatus }
+    var isPowerModeBusy: Bool { powerPresentation.pendingMode != nil }
 
     func refresh() async {
         await run {
@@ -139,6 +144,41 @@ final class DaemonClient: ObservableObject {
         }
     }
 
+    func setPowerMode(_ mode: PowerMode) async {
+        guard !isBusy, !isPowerModeBusy else { return }
+        isBusy = true
+        errorMessage = nil
+        let requestID = powerPresentation.begin(mode)
+        do {
+            let response = try await perform(
+                operation: .setPowerMode,
+                payload: SetPowerModeRequest(mode: mode),
+                response: PowerControlStatus.self
+            )
+            guard powerPresentation.confirm(response, requestID: requestID) else {
+                isBusy = false
+                return
+            }
+            do {
+                try await loadStatus()
+            } catch {
+                errorMessage =
+                    "The sleep mode changed, but the service status could not be refreshed."
+            }
+        } catch {
+            let message =
+                "Could not confirm the sleep mode. MacTower read the service state without retrying the change."
+            _ = powerPresentation.fail(requestID: requestID, message: message)
+            errorMessage = message
+            try? await loadStatus()
+        }
+        isBusy = false
+    }
+
+    func stop() {
+        replies.disconnect()
+    }
+
     private func run(_ body: () async throws -> Void) async {
         guard !isBusy else { return }
         isBusy = true
@@ -152,7 +192,9 @@ final class DaemonClient: ObservableObject {
     }
 
     private func loadStatus() async throws {
-        status = try await perform(operation: .status, response: DaemonStatus.self)
+        let loaded = try await perform(operation: .status, response: DaemonStatus.self)
+        status = loaded
+        powerPresentation.observe(loaded.powerControl)
     }
 
     private func perform<Response: Decodable>(
@@ -184,26 +226,40 @@ final class DaemonClient: ObservableObject {
         let connection = try makeConnection()
         defer { connection.invalidate() }
 
-        let data: Data = try await withCheckedThrowingContinuation { continuation in
-            let gate = ContinuationGate(continuation)
-            guard
-                let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
-                    gate.resume(throwing: DaemonClientError.unavailable)
-                }) as? MacTowerDaemonXPCProtocol
-            else {
-                gate.resume(throwing: DaemonClientError.unavailable)
-                return
-            }
-            proxy.perform(request) { data, error in
-                if error != nil {
-                    gate.resume(throwing: DaemonClientError.rejected)
-                } else if let data {
-                    gate.resume(returning: data)
-                } else {
-                    gate.resume(throwing: DaemonClientError.unavailable)
+        let data = try await replies.request(
+            timeout: .seconds(3),
+            onTimeout: { connection.invalidate() },
+            start: { [weak self] requestID in
+                guard let self else { return }
+                let finishWithError: @Sendable (Error) -> Void = { [weak self] error in
+                    Task { @MainActor in
+                        self?.replies.finish(requestID, result: .failure(error))
+                    }
                 }
-            }
-        }
+                guard
+                    let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+                        finishWithError(DaemonClientError.unavailable)
+                    }) as? MacTowerDaemonXPCProtocol
+                else {
+                    replies.finish(
+                        requestID, result: .failure(DaemonClientError.unavailable))
+                    return
+                }
+                proxy.perform(request) { [weak self] data, error in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        if error != nil {
+                            self.replies.finish(
+                                requestID, result: .failure(DaemonClientError.rejected))
+                        } else if let data {
+                            self.replies.finish(requestID, result: .success(data))
+                        } else {
+                            self.replies.finish(
+                                requestID, result: .failure(DaemonClientError.unavailable))
+                        }
+                    }
+                }
+            })
         return try JSONDecoder().decode(Response.self, from: data)
     }
 
@@ -215,28 +271,3 @@ final class DaemonClient: ObservableObject {
 }
 
 private struct EmptyResponse: Codable {}
-
-private final class ContinuationGate<Value: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Value, Error>?
-
-    init(_ continuation: CheckedContinuation<Value, Error>) {
-        self.continuation = continuation
-    }
-
-    func resume(returning value: Value) {
-        take()?.resume(returning: value)
-    }
-
-    func resume(throwing error: Error) {
-        take()?.resume(throwing: error)
-    }
-
-    private func take() -> CheckedContinuation<Value, Error>? {
-        lock.lock()
-        defer { lock.unlock() }
-        let value = continuation
-        continuation = nil
-        return value
-    }
-}
