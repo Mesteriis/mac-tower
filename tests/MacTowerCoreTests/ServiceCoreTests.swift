@@ -17,6 +17,14 @@ struct ServiceCoreTests {
         #expect(!configuration.mqtt.enabled)
         #expect(configuration.pollIntervalSeconds == 300)
         #expect(configuration.staleAfterSeconds == 900)
+
+        let invalidPersisted = Data(
+            #"{"pollIntervalSeconds":30,"staleAfterSeconds":90,"http":{"enabled":false,"bindAddress":"127.0.0.1","port":8787,"allowedNetworks":[]},"mqtt":{"enabled":false,"host":"localhost","port":1883,"useTLS":false,"topicPrefix":"mac_tower"}}"#
+                .utf8
+        )
+        #expect(throws: ServiceConfigurationError.self) {
+            try ServiceConfiguration.decodeValidated(invalidPersisted)
+        }
     }
 
     @Test("IPv4 CIDR contains only addresses inside its prefix")

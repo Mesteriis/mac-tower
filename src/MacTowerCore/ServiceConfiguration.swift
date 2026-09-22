@@ -77,6 +77,58 @@ public struct ServiceConfiguration: Codable, Equatable, Sendable {
         self.http = try http ?? HTTPServiceConfiguration()
         self.mqtt = try mqtt ?? MQTTServiceConfiguration()
     }
+
+    public static func decodeValidated(_ data: Data) throws -> ServiceConfiguration {
+        let decoded: PersistedServiceConfiguration
+        do {
+            decoded = try JSONDecoder().decode(PersistedServiceConfiguration.self, from: data)
+        } catch {
+            throw ServiceConfigurationError.invalidPollInterval
+        }
+        return try ServiceConfiguration(
+            pollIntervalSeconds: decoded.pollIntervalSeconds,
+            staleAfterSeconds: decoded.staleAfterSeconds,
+            http: HTTPServiceConfiguration(
+                enabled: decoded.http.enabled,
+                bindAddress: decoded.http.bindAddress,
+                port: decoded.http.port,
+                allowedNetworks: decoded.http.allowedNetworks
+            ),
+            mqtt: MQTTServiceConfiguration(
+                enabled: decoded.mqtt.enabled,
+                host: decoded.mqtt.host,
+                port: decoded.mqtt.port,
+                useTLS: decoded.mqtt.useTLS,
+                username: decoded.mqtt.username,
+                passwordSecretName: decoded.mqtt.passwordSecretName,
+                topicPrefix: decoded.mqtt.topicPrefix
+            )
+        )
+    }
+}
+
+private struct PersistedServiceConfiguration: Decodable {
+    struct HTTP: Decodable {
+        let enabled: Bool
+        let bindAddress: String
+        let port: Int
+        let allowedNetworks: [IPv4CIDR]
+    }
+
+    struct MQTT: Decodable {
+        let enabled: Bool
+        let host: String
+        let port: Int
+        let useTLS: Bool
+        let username: String?
+        let passwordSecretName: String?
+        let topicPrefix: String
+    }
+
+    let pollIntervalSeconds: Int
+    let staleAfterSeconds: Int
+    let http: HTTP
+    let mqtt: MQTT
 }
 
 public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {

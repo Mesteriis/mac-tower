@@ -2,6 +2,7 @@ import Darwin
 import Dispatch
 import Foundation
 import MacTowerCore
+import MacTowerTransport
 import OSLog
 
 @main
@@ -42,28 +43,46 @@ struct MacTowerDaemon {
             exit(EX_NOPERM)
         }
 
+        let runtime: DaemonNetworkRuntime
+        do {
+            runtime = try DaemonNetworkRuntime(
+                root: URL(
+                    fileURLWithPath: "/Library/Application Support/MacTower", isDirectory: true)
+            )
+            try runtime.start()
+        } catch {
+            writeError("Failed to start service. Configuration or storage is invalid.")
+            exit(EX_CONFIG)
+        }
+
         // Let dispatch deliver these signals on the main queue, outside a signal handler.
         signal(SIGTERM, SIG_IGN)
         signal(SIGINT, SIG_IGN)
 
         let terminationSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         terminationSource.setEventHandler {
-            logger.info("Daemon stopping after SIGTERM.")
-            exit(EXIT_SUCCESS)
+            Task {
+                await runtime.stop()
+                logger.info("Daemon stopping after SIGTERM.")
+                exit(EXIT_SUCCESS)
+            }
         }
 
         let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         interruptSource.setEventHandler {
-            logger.info("Daemon stopping after SIGINT.")
-            exit(EXIT_SUCCESS)
+            Task {
+                await runtime.stop()
+                logger.info("Daemon stopping after SIGINT.")
+                exit(EXIT_SUCCESS)
+            }
         }
 
         terminationSource.resume()
         interruptSource.resume()
-        logger.info("Daemon started. Network endpoints are not implemented.")
+        logger.info("Daemon started.")
 
         // Keep signal sources alive while dispatch sleeps until an event arrives.
-        withExtendedLifetime((terminationSource, interruptSource)) {
+        withExtendedLifetime((terminationSource, interruptSource, runtime)) {
             dispatchMain()
         }
     }
