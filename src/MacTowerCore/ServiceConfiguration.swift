@@ -278,6 +278,11 @@ public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
         }
     }
 
+    public static func isLocalHostAddress(_ value: String) -> Bool {
+        guard let address = parseHostAddress(value) else { return false }
+        return localAddressRanges.contains { address >= $0.start && address <= $0.end }
+    }
+
     public init(from decoder: Decoder) throws {
         try self.init(decoder.singleValueContainer().decode(String.self))
     }
