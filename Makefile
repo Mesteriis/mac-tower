@@ -2,13 +2,14 @@ SHELL := /bin/bash
 .DEFAULT_GOAL := help
 CONFIGURATION ?= debug
 
-.PHONY: help build test test-mqtt-docker check format lint app run release daemon-help install uninstall purge-data install-dry-run
+.PHONY: help build test test-mqtt-docker test-homeassistant-blueprint check format lint app run release daemon-help install uninstall purge-data install-dry-run
 
 help:
 	@printf '%s\n' \
 	  'build        Build the menu bar app and daemon' \
 	  'test         Run Swift tests' \
 	  'test-mqtt-docker  Run the optional real-broker MQTT integration test' \
+	  'test-homeassistant-blueprint  Validate the Home Assistant blueprint' \
 	  'check        Build, test, lint, and validate resources' \
 	  'format       Format Swift sources' \
 	  'lint         Check Swift formatting' \
@@ -33,15 +34,18 @@ test:
 test-mqtt-docker:
 	bash tests/mqtt_docker_integration.sh
 
+test-homeassistant-blueprint:
+	bash tests/homeassistant_blueprint.sh
+
 lint:
 	xcrun swift-format lint --strict --recursive Package.swift src tests
 
 format:
 	xcrun swift-format format --in-place --recursive Package.swift src tests
 
-check: build test lint
+check: build test lint test-homeassistant-blueprint
 	plutil -lint src/Resources/Info.plist src/Resources/dev.mactower.daemon.plist
-	bash -n src/scripts/build_app.sh src/scripts/build_and_run.sh src/scripts/test.sh src/scripts/install.sh src/scripts/uninstall.sh src/scripts/purge_data.sh tests/daemon_cli.sh tests/claude_bridge_cli.sh tests/installer_dry_run.sh tests/mqtt_docker_integration.sh
+	bash -n src/scripts/build_app.sh src/scripts/build_and_run.sh src/scripts/test.sh src/scripts/install.sh src/scripts/uninstall.sh src/scripts/purge_data.sh tests/daemon_cli.sh tests/claude_bridge_cli.sh tests/installer_dry_run.sh tests/mqtt_docker_integration.sh tests/homeassistant_blueprint.sh
 
 app:
 	./src/scripts/build_app.sh $(CONFIGURATION)
