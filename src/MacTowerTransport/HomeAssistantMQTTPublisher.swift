@@ -8,6 +8,8 @@ public actor HomeAssistantMQTTPublisher {
     private let client: MQTTClient
     private let availabilityTopic: String
     private let windowCommandPrefix: String
+    private let notificationInboxPrefix: String
+    private let notificationAcknowledgementTopic: String
     private let listenerName = "mac-tower-home-assistant-birth"
     private let closeListenerName = "mac-tower-reconnect"
     private var connected = false
@@ -19,6 +21,8 @@ public actor HomeAssistantMQTTPublisher {
     ) {
         availabilityTopic = "\(configuration.topicPrefix)/availability"
         windowCommandPrefix = "\(configuration.topicPrefix)/window-control/"
+        notificationInboxPrefix = "\(configuration.topicPrefix)/notifications/inbox/"
+        notificationAcknowledgementTopic = "\(configuration.topicPrefix)/notifications/ack"
         client = MQTTClient(
             host: configuration.host,
             port: configuration.port,
@@ -36,7 +40,9 @@ public actor HomeAssistantMQTTPublisher {
     public func connect(
         onHomeAssistantBirth: @escaping @Sendable () -> Void,
         onDisconnect: @escaping @Sendable () -> Void,
-        onWindowCommand: (@Sendable (String, Data, Bool) -> Void)? = nil
+        onWindowCommand: (@Sendable (String, Data, Bool) -> Void)? = nil,
+        onNotificationIngress: (@Sendable (String, Data, Bool) -> Void)? = nil,
+        onNotificationAcknowledgement: (@Sendable (String, Data, Bool) -> Void)? = nil
     ) async throws {
         guard !connected else { return }
         var offline = ByteBufferAllocator().buffer(capacity: 7)
@@ -53,6 +59,8 @@ public actor HomeAssistantMQTTPublisher {
             )
         )
         let windowCommandPrefix = self.windowCommandPrefix
+        let notificationInboxPrefix = self.notificationInboxPrefix
+        let notificationAcknowledgementTopic = self.notificationAcknowledgementTopic
         client.addPublishListener(named: listenerName) { result in
             guard case .success(let info) = result else { return }
             if info.topicName == "homeassistant/status" {
@@ -62,6 +70,29 @@ public actor HomeAssistantMQTTPublisher {
                 {
                     onHomeAssistantBirth()
                 }
+            } else if let onNotificationIngress,
+                info.payload.readableBytes <= NotificationWireCodec.maximumPayloadBytes,
+                info.topicName.utf8.count
+                    <= notificationInboxPrefix.utf8.count + 64,
+                info.topicName.hasPrefix(notificationInboxPrefix)
+            {
+                let sourceID = String(info.topicName.dropFirst(notificationInboxPrefix.count))
+                guard !sourceID.contains("/"), NotificationSourceID(rawValue: sourceID) != nil
+                else { return }
+                onNotificationIngress(
+                    info.topicName,
+                    Data(info.payload.readableBytesView),
+                    info.retain
+                )
+            } else if let onNotificationAcknowledgement,
+                info.topicName == notificationAcknowledgementTopic,
+                info.payload.readableBytes <= NotificationWireCodec.maximumPayloadBytes
+            {
+                onNotificationAcknowledgement(
+                    info.topicName,
+                    Data(info.payload.readableBytesView),
+                    info.retain
+                )
             } else if let onWindowCommand,
                 info.payload.readableBytes <= WindowMQTTPlanner.maximumCommandPayloadBytes,
                 info.topicName.utf8.count <= windowCommandPrefix.utf8.count + 78,
@@ -80,15 +111,32 @@ public actor HomeAssistantMQTTPublisher {
             Task { await self?.markDisconnected() }
             onDisconnect()
         }
-        _ = try await client.v5.subscribe(
-            to: [
-                .init(topicFilter: "homeassistant/status", qos: .atLeastOnce),
+        var subscriptions: [MQTTSubscribeInfoV5] = [
+            .init(topicFilter: "homeassistant/status", qos: .atLeastOnce),
+            .init(
+                topicFilter: "\(windowCommandPrefix)+/+/move", qos: .atMostOnce,
+                retainAsPublished: true, retainHandling: .doNotSend
+            ),
+        ]
+        if onNotificationIngress != nil {
+            subscriptions.append(
                 .init(
-                    topicFilter: "\(windowCommandPrefix)+/+/move", qos: .atMostOnce,
-                    retainAsPublished: true, retainHandling: .doNotSend
-                ),
-            ]
-        )
+                    topicFilter: "\(notificationInboxPrefix)+",
+                    qos: .atLeastOnce,
+                    retainAsPublished: true,
+                    retainHandling: .doNotSend
+                ))
+        }
+        if onNotificationAcknowledgement != nil {
+            subscriptions.append(
+                .init(
+                    topicFilter: notificationAcknowledgementTopic,
+                    qos: .atLeastOnce,
+                    retainAsPublished: true,
+                    retainHandling: .doNotSend
+                ))
+        }
+        _ = try await client.v5.subscribe(to: subscriptions)
         connected = true
     }
 

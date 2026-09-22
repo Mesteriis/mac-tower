@@ -47,6 +47,7 @@ struct MacTowerDaemon {
         let runtime: DaemonNetworkRuntime
         let xpcServer: DaemonXPCServer
         let powerControl: PowerControlService
+        let notificationService: NotificationService?
         let lifecycle: DaemonLifecycle
         do {
             let root = URL(
@@ -55,6 +56,14 @@ struct MacTowerDaemon {
             )
             let controller = try ManagementController(root: root)
             let windowControl = try WindowControlService(root: root)
+            do {
+                notificationService = try NotificationService(root: root)
+            } catch {
+                notificationService = nil
+                logger.error(
+                    "Notifications unavailable because their private state is invalid; other subsystems continue."
+                )
+            }
             do {
                 powerControl = try PowerControlService(root: root)
             } catch {
@@ -65,7 +74,11 @@ struct MacTowerDaemon {
                 logger.error("Power settings unavailable; running without sleep assertions.")
             }
             runtime = try DaemonNetworkRuntime(
-                root: root, controller: controller, windowControl: windowControl)
+                root: root,
+                controller: controller,
+                windowControl: windowControl,
+                notificationService: notificationService
+            )
             xpcServer = try DaemonXPCServer(
                 controller: controller,
                 windowControl: windowControl,
@@ -73,7 +86,11 @@ struct MacTowerDaemon {
                 trustManifestURL: URL(
                     fileURLWithPath: "/Library/Preferences/dev.mactower.trust.json")
             )
-            lifecycle = DaemonLifecycle(power: powerControl, network: runtime)
+            lifecycle = DaemonLifecycle(
+                power: powerControl,
+                network: runtime,
+                notifications: notificationService
+            )
             xpcServer.start()
             try runtime.start()
         } catch {

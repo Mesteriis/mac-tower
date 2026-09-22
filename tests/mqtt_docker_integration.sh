@@ -39,4 +39,4 @@ if [[ "$payload" != '{"status":"ok"}' ]]; then
     exit 1
 fi
 
-printf 'PASS: MQTTNIO retained state, fresh sessions, and nonreplayed window commands through Docker Mosquitto.\n'
+printf 'PASS: MQTTNIO retained state, fresh sessions, nonreplayed window commands, and notification topics through Docker Mosquitto.\n'

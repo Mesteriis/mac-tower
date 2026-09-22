@@ -354,6 +354,16 @@ public actor NotificationEngine {
         )
     }
 
+    public func record(eventID: UUID) -> NotificationRecord? {
+        state.records.first { $0.event.eventID == eventID }
+    }
+
+    public func activeRecords() -> [NotificationRecord] {
+        state.records
+            .filter { $0.isActive && $0.event.severity == .critical }
+            .sorted(by: Self.isMoreRecent)
+    }
+
     private func updateDeduplicatedRecord(
         at index: Int,
         input: NotificationIngress,

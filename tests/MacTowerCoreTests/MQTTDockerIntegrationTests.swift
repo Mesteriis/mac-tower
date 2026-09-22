@@ -178,6 +178,123 @@ struct MQTTDockerIntegrationTests {
         try await sender.shutdown()
     }
 
+    @Test("Notification topics use fresh sessions, live-only ingress, and retained active state")
+    func mqttDockerNotifications() async throws {
+        guard let rawPort = ProcessInfo.processInfo.environment["MACTOWER_MQTT_TEST_PORT"],
+            let port = Int(rawPort)
+        else { return }
+
+        let identifier = "mac-tower-notification-test-\(UUID().uuidString.lowercased())"
+        let prefix = "mac_tower_test/\(identifier)"
+        let inbox = "\(prefix)/notifications/inbox/integration"
+        let ack = "\(prefix)/notifications/ack"
+        let sender = mqttClient(port: port, identifier: identifier + "-sender")
+        _ = try await sender.v5.connect(cleanStart: true, properties: [.sessionExpiryInterval(0)])
+        let payload = Data("live-event".utf8)
+
+        // Existing retained writes must not replay into either state-changing callback.
+        try await send(sender, topic: inbox, payload: Data("retained-event".utf8), retain: true)
+        try await send(sender, topic: ack, payload: Data("retained-ack".utf8), retain: true)
+
+        let callbacks = NotificationMQTTIntegrationEvents()
+        let configuration = try MQTTServiceConfiguration(
+            enabled: true, host: "127.0.0.1", port: port, topicPrefix: prefix)
+        let publisher = HomeAssistantMQTTPublisher(
+            configuration: configuration, password: nil, clientIdentifier: identifier)
+        try await publisher.connect(
+            onHomeAssistantBirth: {},
+            onDisconnect: {},
+            onNotificationIngress: {
+                callbacks.append(.ingress($0, $1, $2))
+            },
+            onNotificationAcknowledgement: {
+                callbacks.append(.acknowledgement($0, $1, $2))
+            }
+        )
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(callbacks.values.isEmpty)
+
+        try await send(sender, topic: inbox, payload: payload, retain: false)
+        try await callbacks.waitForCount(1)
+        #expect(callbacks.values == [.ingress(inbox, payload, false)])
+        try await send(sender, topic: ack, payload: Data("live-ack".utf8), retain: false)
+        try await callbacks.waitForCount(2)
+        #expect(callbacks.values.last == .acknowledgement(ack, Data("live-ack".utf8), false))
+
+        let eventID = UUID()
+        let record = NotificationRecord(
+            event: NotificationEvent(
+                eventID: eventID,
+                sourceID: NotificationSourceID(rawValue: "integration")!,
+                severity: .critical,
+                title: "Integration",
+                message: "Live",
+                createdAt: Date()
+            ),
+            firstSeenAt: Date(),
+            lastSeenAt: Date(),
+            isActive: true,
+            deliveryPlan: NotificationDeliveryPlan(channels: [.mqtt]),
+            deliveries: [.mqtt: NotificationChannelDelivery(state: .queued)]
+        )
+        let planner = NotificationMQTTPlanner(topicPrefix: prefix)
+        let eventPublication = try planner.eventPublication(record)
+        let activePublication = try planner.activePublication(record)
+        try await publisher.publish([eventPublication, activePublication])
+
+        let observed = MQTTIntegrationEvents()
+        sender.addPublishListener(named: "notification-observer") { response in
+            guard case .success(let message) = response else { return }
+            observed.append(
+                .command(message.topicName, Data(message.payload.readableBytesView), message.retain)
+            )
+        }
+        _ = try await sender.v5.subscribe(to: [
+            .init(
+                topicFilter: eventPublication.topic, qos: .atLeastOnce,
+                retainHandling: .sendAlways),
+            .init(
+                topicFilter: activePublication.topic, qos: .atLeastOnce,
+                retainHandling: .sendAlways),
+        ])
+        try await observed.waitForCount(1)
+        #expect(
+            observed.values == [.command(activePublication.topic, activePublication.payload, true)])
+        try await publisher.publish([eventPublication])
+        try await observed.waitForCount(2)
+        #expect(
+            observed.values.last
+                == .command(eventPublication.topic, eventPublication.payload, false))
+
+        // Outbound messages cannot feed back into the ingress namespace.
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(callbacks.values.count == 2)
+
+        try await publisher.disconnect()
+        try await send(sender, topic: inbox, payload: Data("offline".utf8), retain: false)
+        let reconnectedCallbacks = NotificationMQTTIntegrationEvents()
+        let reconnected = HomeAssistantMQTTPublisher(
+            configuration: configuration, password: nil, clientIdentifier: identifier)
+        try await reconnected.connect(
+            onHomeAssistantBirth: {}, onDisconnect: {},
+            onNotificationIngress: {
+                reconnectedCallbacks.append(.ingress($0, $1, $2))
+            }
+        )
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(reconnectedCallbacks.values.isEmpty)
+        try await send(sender, topic: inbox, payload: Data("after-reconnect".utf8), retain: false)
+        try await reconnectedCallbacks.waitForCount(1)
+
+        try await reconnected.publish([planner.clearActivePublication(eventID)])
+        try await send(sender, topic: inbox, payload: Data(), retain: true)
+        try await send(sender, topic: ack, payload: Data(), retain: true)
+        try await reconnected.disconnect()
+        sender.removePublishListener(named: "notification-observer")
+        try await sender.v5.disconnect()
+        try await sender.shutdown()
+    }
+
     private func mqttClient(port: Int, identifier: String) -> MQTTClient {
         MQTTClient(
             host: "127.0.0.1", port: port, identifier: identifier,
@@ -227,4 +344,29 @@ private final class MQTTIntegrationEvents: @unchecked Sendable {
 
 private enum MQTTIntegrationError: Error {
     case timeout
+}
+
+private enum NotificationMQTTIntegrationEvent: Equatable, Sendable {
+    case ingress(String, Data, Bool)
+    case acknowledgement(String, Data, Bool)
+}
+
+private final class NotificationMQTTIntegrationEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [NotificationMQTTIntegrationEvent] = []
+
+    var values: [NotificationMQTTIntegrationEvent] { lock.withLock { recorded } }
+
+    func append(_ event: NotificationMQTTIntegrationEvent) {
+        lock.withLock { recorded.append(event) }
+    }
+
+    func waitForCount(_ count: Int) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while values.count < count {
+            guard clock.now < deadline else { throw MQTTIntegrationError.timeout }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
 }

@@ -8,6 +8,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     private let storage: PrivateFileStore
     private let controller: ManagementController
     private let windowControl: WindowControlService
+    private let notificationService: (any NotificationServiceControlling)?
     private let configuration: ServiceConfiguration
     private let mqttLedger: MQTTAdvertisementLedger
     private let snapshots = SnapshotStore()
@@ -15,13 +16,20 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     private var mqttPublisher: HomeAssistantMQTTPublisher?
     private var windowMQTT: WindowMQTTRuntime?
     private var mqttTask: Task<Void, Never>?
+    private var notificationStartTask: Task<Void, Never>?
     private var collectionTask: Task<Void, Never>?
 
-    init(root: URL, controller: ManagementController, windowControl: WindowControlService) throws {
+    init(
+        root: URL,
+        controller: ManagementController,
+        windowControl: WindowControlService,
+        notificationService: (any NotificationServiceControlling)? = nil
+    ) throws {
         storage = try PrivateFileStore(root: root)
         mqttLedger = try MQTTAdvertisementLedger(storage: storage)
         self.controller = controller
         self.windowControl = windowControl
+        self.notificationService = notificationService
         if let data = try storage.read(named: "service.json") {
             configuration = try ServiceConfiguration.decodeValidated(data)
         } else {
@@ -31,6 +39,14 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
 
     func start() throws {
         let restored = try loadSnapshots()
+        let notificationStartTask = Task { [weak self] in
+            do {
+                try await self?.notificationService?.start()
+            } catch {
+                self?.logger.error("Notification subsystem failed to start; details omitted.")
+            }
+        }
+        self.notificationStartTask = notificationStartTask
         if configuration.http.enabled {
             guard !configuration.http.allowedNetworks.isEmpty else {
                 throw ServiceConfigurationError.invalidCIDR
@@ -65,6 +81,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
             )
             self.windowMQTT = windowMQTT
             mqttTask = Task { [weak self] in
+                await notificationStartTask.value
                 await windowMQTT.start()
                 await self?.runMQTT(publisher)
             }
@@ -88,6 +105,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     func stop() async {
         collectionTask?.cancel()
         mqttTask?.cancel()
+        notificationStartTask?.cancel()
         await windowMQTT?.stop()
         if let publisher = mqttPublisher {
             let planner = HomeAssistantMQTTPlanner(topicPrefix: configuration.mqtt.topicPrefix)
@@ -95,7 +113,9 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
             try? await publisher.disconnect()
         }
         mqttPublisher = nil
+        await notificationService?.setMQTTPublisher(nil)
         mqttTask = nil
+        notificationStartTask = nil
         collectionTask = nil
         try? httpServer?.stop()
         httpServer = nil
@@ -110,6 +130,24 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
         while !Task.isCancelled {
             let (disconnects, continuation) = AsyncStream<Void>.makeStream()
             do {
+                let onNotificationIngress: (@Sendable (String, Data, Bool) -> Void)?
+                let onNotificationAcknowledgement: (@Sendable (String, Data, Bool) -> Void)?
+                if let notificationService {
+                    onNotificationIngress = { topic, payload, retained in
+                        Task {
+                            await notificationService.receiveMQTT(
+                                topic: topic,
+                                payload: payload,
+                                retained: retained,
+                                now: Date()
+                            )
+                        }
+                    }
+                    onNotificationAcknowledgement = onNotificationIngress
+                } else {
+                    onNotificationIngress = nil
+                    onNotificationAcknowledgement = nil
+                }
                 try await publisher.connect(
                     onHomeAssistantBirth: { [weak self] in
                         Task { await self?.publishHomeAssistantBirth() }
@@ -124,8 +162,11 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
                             await self?.windowMQTT?.receive(
                                 topic: topic, payload: payload, retained: retained)
                         }
-                    }
+                    },
+                    onNotificationIngress: onNotificationIngress,
+                    onNotificationAcknowledgement: onNotificationAcknowledgement
                 )
+                await notificationService?.setMQTTPublisher(publisher)
                 await windowMQTT?.setConnected(true)
                 failures = 0
                 let entries = await snapshots.all()
@@ -147,6 +188,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
             } catch {
                 continuation.finish()
             }
+            await notificationService?.setMQTTPublisher(nil)
             await windowMQTT?.setConnected(false)
             guard !Task.isCancelled else { return }
             failures += 1
