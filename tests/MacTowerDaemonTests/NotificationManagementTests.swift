@@ -157,6 +157,7 @@ private actor FakeNotificationManagementService: NotificationServiceControlling 
     func stop() async {}
     func setMQTTPublisher(_ publisher: (any NotificationMQTTPublishing)?) async {}
     func receiveMQTT(topic: String, payload: Data, retained: Bool, now: Date) async {}
+    func ingest(_ input: NotificationIngress, now: Date) async throws {}
     func registerUserAgent(_ agent: (any NotificationUserAgent)?) async {}
     func unregisterUserAgent(id: UUID) async {}
     func acknowledge(

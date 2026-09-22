@@ -32,6 +32,7 @@ protocol NotificationServiceControlling: Sendable {
     func stop() async
     func setMQTTPublisher(_ publisher: (any NotificationMQTTPublishing)?) async
     func receiveMQTT(topic: String, payload: Data, retained: Bool, now: Date) async
+    func ingest(_ input: NotificationIngress, now: Date) async throws
     func registerUserAgent(_ agent: (any NotificationUserAgent)?) async
     func unregisterUserAgent(id: UUID) async
     func acknowledge(
@@ -181,6 +182,11 @@ actor NotificationService: NotificationServiceControlling, NotificationStopping 
             invalidInputCount = min(invalidInputCount + 1, 10_000)
             logger.error("Notification MQTT input rejected with a finite validation error.")
         }
+    }
+
+    func ingest(_ input: NotificationIngress, now: Date) async throws {
+        let effects = try await engine.ingest(input, now: now, calendar: .current)
+        await execute(effects, attemptedAt: now)
     }
 
     func acknowledge(

@@ -88,16 +88,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
         }
         collectionTask = Task { [weak self] in
             guard let self else { return }
-            for entry in restored {
-                await self.snapshots.recordSuccess(entry.snapshot, attemptedAt: entry.lastAttemptAt)
-                if let failure = entry.lastFailure {
-                    await self.snapshots.recordFailure(
-                        accountID: entry.snapshot.id,
-                        attemptedAt: entry.lastAttemptAt,
-                        reason: failure
-                    )
-                }
-            }
+            await self.snapshots.restore(restored)
             await self.runCollectionLoop()
         }
     }
@@ -220,9 +211,28 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     private func runCollectionLoop() async {
         let planner = HomeAssistantMQTTPlanner(topicPrefix: configuration.mqtt.topicPrefix)
         while !Task.isCancelled {
+            let previous = await snapshots.all()
             _ = await controller.collectAll(into: snapshots)
+            let entries = await snapshots.all()
+            if let notificationService {
+                do {
+                    let aiConfiguration = await notificationService.configuration().ai
+                    let now = Date()
+                    let events = try AINotificationDetector().events(
+                        previous: previous,
+                        current: entries,
+                        configuration: aiConfiguration,
+                        now: now
+                    )
+                    for event in events {
+                        try await notificationService.ingest(event, now: now)
+                    }
+                } catch {
+                    logger.error(
+                        "AI notification transition detection failed with finite details omitted.")
+                }
+            }
             do {
-                let entries = await snapshots.all()
                 try persistSnapshots(entries)
                 if let mqttPublisher {
                     let publications = try planner.snapshotPublications(
