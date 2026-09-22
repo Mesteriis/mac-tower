@@ -16,6 +16,12 @@ let package = Package(
     targets: [
         .target(name: "MacTowerCore", path: "src/MacTowerCore"),
         .target(
+            name: "MacTowerPowerControl",
+            dependencies: ["MacTowerCore"],
+            path: "src/MacTowerPowerControl",
+            linkerSettings: [.linkedFramework("IOKit")]
+        ),
+        .target(
             name: "MacTowerWindowControl",
             dependencies: ["MacTowerCore"],
             path: "src/MacTowerWindowControl"
@@ -38,7 +44,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "MacTowerDaemon",
-            dependencies: ["MacTowerCore", "MacTowerTransport"],
+            dependencies: ["MacTowerCore", "MacTowerPowerControl", "MacTowerTransport"],
             path: "src/MacTowerDaemon"
         ),
         .executableTarget(
@@ -60,6 +66,11 @@ let package = Package(
             name: "MacTowerCoreTests",
             dependencies: ["MacTowerCore", "MacTowerTransport"],
             path: "tests/MacTowerCoreTests"
+        ),
+        .testTarget(
+            name: "MacTowerPowerControlTests",
+            dependencies: ["MacTowerCore", "MacTowerPowerControl"],
+            path: "tests/MacTowerPowerControlTests"
         ),
     ]
 )
