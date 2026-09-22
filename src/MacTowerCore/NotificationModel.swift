@@ -266,13 +266,23 @@ public struct NotificationRecord: Codable, Equatable, Sendable {
     }
 }
 
+public struct NotificationHistoryCursor: Codable, Equatable, Sendable {
+    public let lastSeenAt: Date
+    public let eventID: UUID
+
+    public init(lastSeenAt: Date, eventID: UUID) {
+        self.lastSeenAt = lastSeenAt
+        self.eventID = eventID
+    }
+}
+
 public struct NotificationHistoryPage: Codable, Equatable, Sendable {
     public let records: [NotificationRecord]
-    public let nextBefore: Date?
+    public let nextCursor: NotificationHistoryCursor?
 
-    public init(records: [NotificationRecord], nextBefore: Date?) {
+    public init(records: [NotificationRecord], nextCursor: NotificationHistoryCursor?) {
         self.records = records
-        self.nextBefore = nextBefore
+        self.nextCursor = nextCursor
     }
 }
 

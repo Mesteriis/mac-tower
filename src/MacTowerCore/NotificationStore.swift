@@ -114,6 +114,7 @@ public struct FileNotificationStateStore: NotificationStateStore, Sendable {
             throw NotificationStoreError.invalidConfiguration
         }
         guard state.records.count <= 5_000,
+            state.knownSources.count <= 5_000,
             state.records.allSatisfy({ record in
                 record.event.schemaVersion == 1 && record.occurrenceCount > 0
                     && state.knownSources.contains(record.event.sourceID)
