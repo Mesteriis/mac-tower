@@ -22,6 +22,7 @@ build:
 test:
 	./src/scripts/test.sh
 	bash tests/daemon_cli.sh "$$(swift build --show-bin-path)/mac-tower-daemon"
+	bash tests/claude_bridge_cli.sh "$$(swift build --show-bin-path)/mac-tower-claude-bridge"
 
 lint:
 	xcrun swift-format lint --strict --recursive Package.swift src tests
@@ -31,7 +32,7 @@ format:
 
 check: build test lint
 	plutil -lint src/Resources/Info.plist src/Resources/dev.mactower.daemon.plist
-	bash -n src/scripts/build_app.sh src/scripts/build_and_run.sh src/scripts/test.sh tests/daemon_cli.sh
+	bash -n src/scripts/build_app.sh src/scripts/build_and_run.sh src/scripts/test.sh tests/daemon_cli.sh tests/claude_bridge_cli.sh
 
 app:
 	./src/scripts/build_app.sh $(CONFIGURATION)

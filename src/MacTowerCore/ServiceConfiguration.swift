@@ -1,0 +1,163 @@
+import Darwin
+import Foundation
+
+public enum ServiceConfigurationError: Error, Equatable {
+    case invalidPollInterval
+    case invalidCIDR
+    case invalidAccountID
+    case invalidPort
+}
+
+public struct HTTPServiceConfiguration: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var bindAddress: String
+    public var port: Int
+    public var allowedNetworks: [IPv4CIDR]
+
+    public init(
+        enabled: Bool = false,
+        bindAddress: String = "127.0.0.1",
+        port: Int = 8787,
+        allowedNetworks: [IPv4CIDR] = []
+    ) throws {
+        guard (1...65_535).contains(port) else { throw ServiceConfigurationError.invalidPort }
+        self.enabled = enabled
+        self.bindAddress = bindAddress
+        self.port = port
+        self.allowedNetworks = allowedNetworks
+    }
+}
+
+public struct MQTTServiceConfiguration: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var host: String
+    public var port: Int
+    public var useTLS: Bool
+    public var username: String?
+    public var passwordSecretName: String?
+    public var topicPrefix: String
+
+    public init(
+        enabled: Bool = false,
+        host: String = "localhost",
+        port: Int = 1883,
+        useTLS: Bool = false,
+        username: String? = nil,
+        passwordSecretName: String? = nil,
+        topicPrefix: String = "mac_tower"
+    ) throws {
+        guard (1...65_535).contains(port) else { throw ServiceConfigurationError.invalidPort }
+        self.enabled = enabled
+        self.host = host
+        self.port = port
+        self.useTLS = useTLS
+        self.username = username
+        self.passwordSecretName = passwordSecretName
+        self.topicPrefix = topicPrefix
+    }
+}
+
+public struct ServiceConfiguration: Codable, Equatable, Sendable {
+    public var pollIntervalSeconds: Int
+    public var staleAfterSeconds: Int
+    public var http: HTTPServiceConfiguration
+    public var mqtt: MQTTServiceConfiguration
+
+    public init(
+        pollIntervalSeconds: Int = 300,
+        staleAfterSeconds: Int? = nil,
+        http: HTTPServiceConfiguration? = nil,
+        mqtt: MQTTServiceConfiguration? = nil
+    ) throws {
+        guard (60...86_400).contains(pollIntervalSeconds) else {
+            throw ServiceConfigurationError.invalidPollInterval
+        }
+        self.pollIntervalSeconds = pollIntervalSeconds
+        self.staleAfterSeconds = staleAfterSeconds ?? pollIntervalSeconds * 3
+        self.http = try http ?? HTTPServiceConfiguration()
+        self.mqtt = try mqtt ?? MQTTServiceConfiguration()
+    }
+}
+
+public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
+    public let network: UInt32
+    public let prefixLength: UInt8
+
+    public init(_ value: String) throws {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+            let prefix = UInt8(parts[1]),
+            prefix <= 32,
+            let address = Self.parseAddress(String(parts[0]))
+        else {
+            throw ServiceConfigurationError.invalidCIDR
+        }
+
+        prefixLength = prefix
+        network = address & Self.mask(prefixLength: prefix)
+    }
+
+    public func contains(_ address: String) -> Bool {
+        guard let parsed = Self.parseAddress(address) else { return false }
+        return parsed & Self.mask(prefixLength: prefixLength) == network
+    }
+
+    public var description: String {
+        return
+            "\((network >> 24) & 0xff).\((network >> 16) & 0xff).\((network >> 8) & 0xff).\(network & 0xff)/\(prefixLength)"
+    }
+
+    public init(from decoder: Decoder) throws {
+        try self.init(decoder.singleValueContainer().decode(String.self))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(description)
+    }
+
+    private static func parseAddress(_ value: String) -> UInt32? {
+        var address = in_addr()
+        guard inet_pton(AF_INET, value, &address) == 1 else { return nil }
+        return UInt32(bigEndian: address.s_addr)
+    }
+
+    private static func mask(prefixLength: UInt8) -> UInt32 {
+        guard prefixLength > 0 else { return 0 }
+        return UInt32.max << (32 - UInt32(prefixLength))
+    }
+}
+
+public struct ManagedAccountPaths: Sendable {
+    public let root: URL
+
+    public init(root: URL) {
+        self.root = root.standardizedFileURL
+    }
+
+    public func directory(for id: AccountID) throws -> URL {
+        guard id.rawValue.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._-]{0,63}/) != nil else {
+            throw ServiceConfigurationError.invalidAccountID
+        }
+        return root.appending(path: id.rawValue, directoryHint: .isDirectory)
+    }
+}
+
+public struct PollPolicy: Sendable {
+    public let intervalSeconds: Int
+    public let retryBaseSeconds: Int
+
+    public init(intervalSeconds: Int, retryBaseSeconds: Int = 5) {
+        self.intervalSeconds = intervalSeconds
+        self.retryBaseSeconds = retryBaseSeconds
+    }
+
+    public var delayAfterSuccess: Int { intervalSeconds }
+
+    public func delay(afterConsecutiveFailures failures: Int) -> Int {
+        guard failures > 0 else { return intervalSeconds }
+        let exponent = min(failures - 1, 20)
+        let multiplied = retryBaseSeconds.multipliedReportingOverflow(by: 1 << exponent)
+        return min(intervalSeconds, multiplied.overflow ? intervalSeconds : multiplied.partialValue)
+    }
+}

@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .executable(name: "MacTower", targets: ["MacTowerApp"]),
         .executable(name: "mac-tower-daemon", targets: ["MacTowerDaemon"]),
+        .executable(name: "mac-tower-claude-bridge", targets: ["MacTowerClaudeBridge"]),
     ],
     targets: [
         .target(name: "MacTowerCore", path: "src/MacTowerCore"),
@@ -19,6 +20,11 @@ let package = Package(
             name: "MacTowerDaemon",
             dependencies: ["MacTowerCore"],
             path: "src/MacTowerDaemon"
+        ),
+        .executableTarget(
+            name: "MacTowerClaudeBridge",
+            dependencies: ["MacTowerCore"],
+            path: "src/MacTowerClaudeBridge"
         ),
         .testTarget(
             name: "MacTowerCoreTests",
