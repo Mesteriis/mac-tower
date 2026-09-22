@@ -38,7 +38,8 @@ make check
 | --- | --- |
 | `make build` | Build all Swift targets. |
 | `make test` | Run Swift and CLI regression tests. |
-| `make test-mqtt-docker` | Start a disposable loopback-only Mosquitto 2.x container and test telemetry, window-command delivery, retained-message rejection, and reconnection. |
+| `make test-homeassistant-blueprint` | Validate the Home Assistant notification blueprint and its acknowledgement safety rules. |
+| `make test-mqtt-docker` | Start a disposable loopback-only Mosquitto 2.x container and test telemetry, window commands, notification ingress/outbound/ack topics, retained-message rejection, and reconnection. |
 | `make check` | Build, test, lint, and validate resources and shell scripts. |
 | `make format` / `make lint` | Format or verify Swift sources. |
 | `make app` / `make run` | Package or run the development menu bar app. |
@@ -73,6 +74,54 @@ HTTP exposes only:
 Other methods and unknown routes are rejected. HTTP is IPv4-only and requires an explicit RFC1918, loopback, or link-local allowlist containing the selected bind address.
 
 MQTT accepts a private IPv4 address, `localhost`, a single-label LAN hostname, or a `.local` hostname. It supports broker username/password, certificate-verified TLS, retained account state, availability, Home Assistant Discovery, reconnects, HA birth republishing, and durable retained-topic reconciliation. Removed accounts and deselected fields are tombstoned after the broker reconnects; the advertised-topic ledger advances only after successful publication.
+
+## Deliver notifications
+
+Settings → Notifications configures a separate notification engine. It is off by default. Enabling MQTT sensor publication does not enable notification ingress, acknowledgements, or any delivery route; each must be selected explicitly.
+
+With MQTT prefix `<prefix>`, the notification contract is:
+
+| Topic | Direction | Retained | Purpose |
+| --- | --- | --- | --- |
+| `<prefix>/notifications/inbox/<source>` | client → MacTower | rejected if retained | Submit one event. `<source>` is one validated segment. |
+| `<prefix>/notifications/events` | MacTower → broker | no | Events routed to the MQTT channel. |
+| `<prefix>/notifications/panel` | MacTower → Home Assistant | no | Events routed to the panel text channel. |
+| `<prefix>/notifications/active/<event-uuid>` | MacTower → broker | yes | Current active critical state; acknowledgement/expiry publishes a retained tombstone. |
+| `<prefix>/notifications/ack` | Home Assistant → MacTower | rejected if retained | Acknowledge one active critical event. |
+| `<prefix>/notifications/availability` | MacTower → broker | yes | Notification publisher availability. |
+
+An illustrative non-retained inbox payload is:
+
+```json
+{
+  "schema_version": 1,
+  "event_id": "550e8400-e29b-41d4-a716-446655440000",
+  "severity": "critical",
+  "title": "UPS on battery",
+  "message": "Runtime is below ten minutes",
+  "created_at": "2026-09-22T18:00:00Z",
+  "expires_at": "2026-09-22T19:00:00Z",
+  "dedup_key": "ups-on-battery"
+}
+```
+
+The acknowledgement payload is `{"schema_version":1,"event_id":"<event-uuid>"}`. Event identifiers are idempotent. Acknowledgement is accepted only for an active critical event; it stops reminders and clears retained active state. `handed_off` means only that the selected adapter accepted the delivery. It does not mean a person saw or read it.
+
+Use separate broker identities and least-privilege ACLs. Source publishers need write-only access to their exact inbox topics. Home Assistant needs read access to the panel topic and, only when acknowledgement is enabled, write access to the exact ack topic. MacTower needs subscribe access to inbox/ack and publish access to events, panel, active, availability, and its Discovery topics. Do not grant arbitrary LAN clients write access to inbox or ack.
+
+### Home Assistant and NSPanel Pro
+
+Import [`homeassistant/blueprints/automation/mactower/notifications.yaml`](homeassistant/blueprints/automation/mactower/notifications.yaml), create an automation from it, set the panel topic and ack topic above, and explicitly select the NSPanel companion application's `notify.mobile_app_*` action. The blueprint forwards text, uses the event UUID as a stable tag, adds Acknowledge only for eligible critical events, and sends a QoS 1 non-retained acknowledgement. MacTower does not guess a mobile-app notify target.
+
+Panel text travels through MQTT and Home Assistant. Wake and sound use the NSPanel Pro local Open API directly over plain HTTP. Configure an explicit local IPv4 address or `.local` name; the default port is `8081`. Put the Mac and panel on a trusted IoT network because the local token and commands are not protected by TLS on this link. DNS is re-resolved for each operation and every resolved address must remain local.
+
+Pairing is intentionally two-call and physical: press **Pair**, approve MacTower on the panel and press **Done**, then press **Pair** again to receive and store the token. **Clear token** removes only MacTower's saved token; pair again before using direct wake or sound. Supported sound names are `alert1`–`alert5`, `doorbell1`–`doorbell5`, and `alarm1`–`alarm5`. Sound volume is 0–100 and countdown is 0–1799 seconds. The test buttons independently exercise Mac Notification Center, panel text, panel wake, and the default panel sound.
+
+macOS Notification Center permission is requested only from Settings. If denied, use the provided System Settings link. The user-session app must be running for Mac notifications; after logout, root-owned MQTT delivery, retained active state, reminders, and direct paired-panel operations can continue, while the Mac channel stays unavailable. Notification Center action buttons acknowledge critical events only.
+
+Global rules and per-source overrides choose channels separately for `info`, `warning`, and `critical`, with cooldown, critical reminders, optional panel wake/sound, and daily local-time quiet hours. Critical bypass is explicit. History is private daemon state; the UI loads at most 100 rows per page and filters only loaded pages. Ordinary history is retained for 30 days, while old active critical records are preserved until resolved; storage is bounded to 5,000 records.
+
+AI rules can notify on authorization loss/restoration, a remaining-quota threshold crossed from above, a quota reset confirmed by newer provider telemetry, exact DeepSeek currency-balance thresholds, and a configured consecutive-failure boundary/recovery. Missing values do not trigger, repeated Claude statusline data is not a fresh observation, and the passage of a reset timestamp alone does not invent a reset. MacTower does not yet produce battery notifications or battery sensors.
 
 ## Move the active window
 
@@ -118,9 +167,11 @@ See [architecture](docs/architecture.md), [security](SECURITY.md), and [contribu
 
 ## Validation scope
 
-`make check` uses anonymized fixtures, injected window and power backends, command-routing/bridge tests, and local lifecycle dry-runs. It does not install the daemon or create a real power assertion. `make test-mqtt-docker` separately exercises a real local broker. Neither proves live OAuth, real-account quota responses, installed XPC signature enforcement, LaunchDaemon operation after logout, native window behavior, or native sleep behavior.
+`make check` uses anonymized fixtures, injected window and power backends, command-routing/bridge tests, Home Assistant blueprint validation, and local lifecycle dry-runs. It does not install the daemon or create a real power assertion. `make test-mqtt-docker` separately exercises a disposable real broker, including notification retained/non-retained wire behavior. Neither proves live OAuth, real-account quota responses, installed XPC signature enforcement, LaunchDaemon operation after logout, native window behavior, native sleep behavior, Notification Center presentation, or a real NSPanel/Home Assistant delivery.
 
-Before deployment, manually check an installed build with two or more displays: ordinary/fullscreen Safari, Terminal and an Electron app; mixed scaling/vertical layout; unplugging a destination; lock/unlock and locking during fullscreen transition; fast user switching; login-item registration; Accessibility revocation; and an ad-hoc upgrade. Separately verify all three sleep modes, an already-off display, AC/battery transitions, manual sleep/wake, lock/logout, daemon restart, return to Normal, and assertion cleanup. Live GUI/AX, IOKit, signed XPC and login/logout acceptance remain separate from mocked and broker tests.
+Before deployment, run `make install` again after every app/daemon rebuild so the pinned XPC hashes match. Manually check an installed build with two or more displays: ordinary/fullscreen Safari, Terminal and an Electron app; mixed scaling/vertical layout; unplugging a destination; lock/unlock and locking during fullscreen transition; fast user switching; login-item registration; Accessibility revocation; and an ad-hoc upgrade. Separately verify all three sleep modes, an already-off display, AC/battery transitions, manual sleep/wake, lock/logout, daemon restart, return to Normal, and assertion cleanup.
+
+**Manual notification acceptance status: NOT RUN.** It covers Notification Center allow/deny, duplicate and expired MQTT input, source/global rules, quiet hours, Mac acknowledgement, panel text, paired wake, every sound selected for use, Home Assistant acknowledgement, broker/HA/panel outages, logout/login, daemon restart, and absence of tokens or notification text in ordinary logs and LAN sensor endpoints. These checks are not PASS until performed on the installed Mac and real Home Assistant/NSPanel systems.
 
 ## License
 

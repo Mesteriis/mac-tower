@@ -4,8 +4,8 @@
 
 | Component | Context | Responsibility |
 | --- | --- | --- |
-| `MacTowerApp` | Logged-in user | Menu/settings, login-item preference, provider setup, and short-lived management plus persistent duplex window XPC connections. |
-| `MacTowerCore` | Shared | Public sensor model, provider parsers/clients, storage boundaries, HTTP routing, MQTT planning, management DTOs, and validation. |
+| `MacTowerApp` | Logged-in user | Menu/settings, login-item preference, provider setup, notification history/permission UI, and short-lived management plus persistent duplex reverse XPC connections. |
+| `MacTowerCore` | Shared | Public sensor and private notification models, provider parsers/clients, policy/storage boundaries, HTTP routing, MQTT planning, management DTOs, and validation. |
 | `MacTowerTransport` | Root daemon | SwiftNIO HTTP server and MQTTNIO publisher. |
 | `MacTowerWindowControl` | Logged-in user | Display topology, session eligibility, bounded Accessibility adapter and a single app-lifetime window controller. |
 | `MacTowerPowerControl` | Root daemon | Versioned mode storage, serialized assertion state machine, and the public IOKit assertion adapter. |
@@ -26,6 +26,12 @@ Menu bar app <─ daemon cdhash ────── root LaunchDaemon
 Local GUI ─> authenticated XPC ─> root assertion owner ─> IOKit
 
 Home Assistant button ─> MQTT command router ─> pinned duplex XPC ─> user WindowController ─> AX window
+
+MQTT inbox ─> validation/rate limit ─> durable NotificationEngine ─┬─> MQTT event
+AI snapshot transition ───────────────────────────────────────────┤
+                                                                 ├─> reverse XPC ─> Notification Center
+                                                                 └─> HA panel text + NSPanel wake/sound
+Home Assistant acknowledgement ─> MQTT ack ─> durable inactive state + retained tombstone
 ```
 
 Codex and DeepSeek are collected on the configured interval, with a minimum of 60 seconds and a default of five minutes. Failed collections preserve the last snapshot and record the last attempt and classified failure. A reset timestamp does not mutate or zero usage; only a new provider observation does.
@@ -66,8 +72,20 @@ Window MQTT Discovery has its own durable ledger, independent from the sensor le
 
 An independent one-second control-publication loop keeps GUI availability and Discovery responsive even during slow provider collection. MQTT uses clean sessions and never retains commands/results. Unavailable GUI sessions keep known display descriptors offline, while explicit display removal and opt-out reconcile Discovery tombstones. The native controller owns a 20-second deadline; GUI/root reply guards add transport margins, not retries.
 
+## Notification engine
+
+`NotificationEngine` is a root-owned actor with a versioned private store. It validates and rate-limits new events before copying state, evaluates global or exact source rules, persists the candidate state before returning delivery effects, and keeps delivery attempts separate per channel. Duplicate event UUIDs are no-ops; optional deduplication keys update the newest matching source record. Ordinary inactive records expire after 30 days, active critical records survive retention pruning, and the store is capped at 5,000 records/sources.
+
+The MQTT ingress and acknowledgement subscriptions use clean sessions and reject retained messages. Events and panel text are QoS 1 non-retained publications. Active critical records and notification availability are retained; clearing state emits retained empty tombstones. Notification content is absent from sensor/Discovery models and logs, but selected notification topics deliberately contain title/message.
+
+The logged-in app registers as the one trusted reverse-XPC notification agent during its existing heartbeat. Root queues failed Mac deliveries and drains them when a valid agent returns; after logout the root service does not attempt to access a user Keychain or bypass TCC. Notification Center delivery uses a stable event UUID request identifier, and only critical notifications expose the fixed acknowledgement action.
+
+Panel text is an MQTT handoff consumed by the Home Assistant blueprint. Direct wake and sound use a separately paired NSPanel local-HTTP client. Pairing is two-step, and the returned token is saved only after a successful private atomic write. Each request re-resolves the configured host, requires every IPv4 result to be local, selects a deterministic numeric address, refuses redirects, and bounds time and response size. Wake retries once only for transport/timeout; sound is durably marked attempted before its at-most-once call.
+
+AI detection compares the previous and current stored snapshots after collection. It emits only configured transitions: authorization loss/recovery, quota threshold crossings, fresh observed quota resets, exact decimal balance crossings, and consecutive-failure boundary/recovery. Detection failure does not block snapshot persistence or sensor publication.
+
 ## Installation and lifecycle
 
 `make install` is the only install path. It stages the app, installs root-owned helper binaries and the LaunchDaemon plist, pins the selected Codex binary, records trust hashes, and bootstraps launchd. Ordinary builds make no system changes. Changes to the app/daemon XPC contract require reinstalling both trusted hashes. `make uninstall` stops the service, releases process-owned assertions, and removes installed code while preserving `/Library/Application Support/MacTower`, including the saved sleep mode; `make purge-data` handles destructive data removal separately.
 
-Automated tests cover parsers, missing fields, exact money strings, snapshot freshness, secret-free public JSON, local ACLs, HTTP method rejection, MQTT plans/tombstones, storage isolation, Claude bridge restoration, XPC DTO trust requirements, power transitions through an injected backend, release-before-network ordering, CLI privilege behavior, and install/uninstall/purge dry-runs. The optional Docker test verifies a retained MQTTNIO round trip through Mosquitto. Native IOKit behavior, real OAuth, signing/launchd integration, logout operation, and production broker configuration remain manual acceptance checks.
+Automated tests cover parsers, missing fields, exact money strings, snapshot freshness, secret-free public JSON, local ACLs, HTTP method rejection, MQTT plans/tombstones, notification policy/history/rate limits, retained ingress rejection, panel client safety, reverse-XPC delivery, Home Assistant blueprint structure, storage isolation, Claude bridge restoration, XPC DTO trust requirements, power transitions through an injected backend, release-before-network ordering, CLI privilege behavior, and install/uninstall/purge dry-runs. The optional Docker test verifies sensor, window, and notification retained/non-retained wire behavior through Mosquitto. Native IOKit behavior, real OAuth, signing/launchd integration, logout operation, Notification Center, Home Assistant mobile delivery, NSPanel pairing, and production broker ACLs remain manual acceptance checks.

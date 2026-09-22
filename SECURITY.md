@@ -4,7 +4,9 @@
 
 MacTower deliberately provides no application-level authentication on its HTTP sensor endpoints. Enabling HTTP authorizes every client in the configured IPv4 allowlist to read the published telemetry. Never bind it to a public, VPN-wide, or otherwise untrusted network. MQTT security is provided by the configured local broker; use broker credentials and certificate-verified TLS where appropriate.
 
-HTTP has no management operations. Login, secrets, configuration, and account removal remain available only through the local XPC management contract. MQTT additionally supports one explicitly opted-in action: moving the current focused window to a connected display. The window-control preference is off by default, stored separately from network configuration, and changes immediately.
+HTTP has no management operations. Login, secrets, configuration, and account removal remain available only through the local XPC management contract. MQTT has three explicitly opted-in state-changing surfaces: window movement, notification inbox ingestion, and notification acknowledgement. All are off by default. Ingestion creates private history and may fan text out to configured channels. Acknowledgement deactivates an active critical event, stops its reminders, removes its Mac notification, and clears its retained active topic.
+
+The broker is the authority for these MQTT senders. Use distinct credentials and restrict publishers to the exact topics they need: trusted event producers to `<prefix>/notifications/inbox/<source>`, Home Assistant to `<prefix>/notifications/ack`, and trusted Home Assistant clients to the current window command topics. MacTower's credential needs subscribe access to inbox/ack and publish access to notification events, panel, active, availability, sensor state, and Discovery. An anonymous or overly broad broker ACL defeats these boundaries.
 
 ## Window-control boundary
 
@@ -17,6 +19,18 @@ Commands use QoS 0, clean MQTT sessions with zero session expiry, subscription r
 Each AX-changing stage rechecks permission, active owner/console session, deadline, target topology, and cancellation. The lock adapter accepts only a real boolean `false` from the internal `IOConsoleLocked` registry property. Missing, mistyped, or unknown state fails closed. This is a compatibility dependency, not a documented lock-state API or an atomic guarantee against a lock transition racing an AX request. No restoration steps are deliberately performed after detected lock/cancellation.
 
 Window titles, application names/lists, paths, and window contents are not part of public command/result models or logs. Display names are published by Discovery. The finite command cannot specify a process, executable, shell string, arbitrary AX attribute, or arbitrary coordinates.
+
+## Notification boundary
+
+Notification ingress and acknowledgements require separate saved opt-ins. Both use clean MQTT sessions with no offline queue and reject every retained delivery before decoding. Topics are bounded to 512 bytes; payloads are bounded to 16 KiB. Source IDs are a single validated segment, titles are at most 160 Unicode scalars, messages 2,000, and deduplication keys 128 without control characters. New input is limited to 30 events per source and 300 total per rolling minute. Invalid, expired, inconsistent, or more-than-five-minutes-future timestamps are rejected. Persistent state is capped at 5,000 records and 5,000 known sources.
+
+Acknowledgement contains only a schema version and event UUID. It cannot create an event or run an arbitrary operation, but it does change durable notification state and suppress future reminders for that active critical event. Event UUID replay is idempotent. MQTT `handed_off` means broker publication succeeded, not that Home Assistant, a panel, or a person displayed or read the message.
+
+Notification title and message are deliberately published only on selected notification routes: non-retained `<prefix>/notifications/events`, non-retained `<prefix>/notifications/panel`, and retained `<prefix>/notifications/active/<event-uuid>`. Active critical text therefore persists at the broker until acknowledgement or expiry publishes a tombstone. Notification text is not added to sensor state, Home Assistant Discovery configuration, public HTTP sensor responses, or ordinary logs. The private root notification store also contains event text and uses the same `0700` directory, `0600` regular-file, no-symlink, atomic-write boundary as other daemon state.
+
+Mac Notification Center delivery crosses the pinned reverse XPC connection to the installation owner's current GUI session. Logout makes that channel unavailable; it does not cause root to impersonate the user or bypass notification consent. Critical action buttons can invoke only the fixed acknowledgement operation. Removing a notification after acknowledgement is best-effort UI cleanup, not evidence that it had been read.
+
+NSPanel wake and sound use its local Open API over plain HTTP, authenticated by a daemon-held token. Pairing requires an explicit local host and physical approval on the panel; redirects, public/mixed DNS results, oversized responses, and malformed replies are rejected. Plain HTTP cannot protect the token against an observer on the same network, so use a trusted, isolated IoT LAN. Clearing the token disables direct operations until a new physical pairing; it does not revoke a token at the panel itself.
 
 ## Power-control boundary
 
@@ -57,10 +71,14 @@ Provider credentials, provider email addresses, raw responses, project paths, tr
 - IPv6 publishing is not implemented.
 - An allowlisted network is a trust grant; RFC1918 addressing alone does not make its devices trustworthy.
 - Network listener changes require a daemon restart.
+- Notification MQTT ingress and acknowledgement trust the broker identity/ACL configuration; MacTower does not add per-message signatures.
+- Active critical notification text is intentionally retained on the configured broker until a tombstone is published.
+- NSPanel direct control is plain HTTP on the local network; it is not suitable for an untrusted shared LAN.
+- Mac Notification Center requires the user-session app and permission. A successful handoff is not proof of display or reading.
 - Keep-awake modes prevent idle sleep only. They do not override manual sleep, lid-close sleep, critical-battery protection, screen locking, or Dark Wake, and they do not wake an already-off display.
 - Unit tests inject a fake assertion backend. Native IOKit assertion creation, release, restoration after daemon restart/logout, and battery behavior require manual acceptance.
 - Claude telemetry is last-seen statusline data, not an autonomous provider poll. It can become stale after the CLI or user session stops.
-- Unit fixtures and installer dry-runs do not replace manual testing with real accounts, an installed LaunchDaemon, logout, or a real MQTT broker.
+- Unit fixtures, blueprint validation, broker tests, and installer dry-runs do not replace manual testing with real accounts, an installed LaunchDaemon, logout, Notification Center, Home Assistant, or an NSPanel Pro.
 
 ## Reporting a vulnerability
 

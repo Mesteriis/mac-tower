@@ -7,9 +7,9 @@ CONFIGURATION ?= debug
 help:
 	@printf '%s\n' \
 	  'build        Build the menu bar app and daemon' \
-	  'test         Run Swift tests' \
-	  'test-mqtt-docker  Run the optional real-broker MQTT integration test' \
-	  'test-homeassistant-blueprint  Validate the Home Assistant blueprint' \
+	  'test         Run Swift, CLI, and lifecycle contract tests' \
+	  'test-mqtt-docker  Test sensor, window, and notification MQTT wire behavior' \
+	  'test-homeassistant-blueprint  Validate notification forwarding and ack safety' \
 	  'check        Build, test, lint, and validate resources' \
 	  'format       Format Swift sources' \
 	  'lint         Check Swift formatting' \

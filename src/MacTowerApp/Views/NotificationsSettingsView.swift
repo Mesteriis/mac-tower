@@ -380,7 +380,7 @@ struct NotificationsSettingsView: View {
 
     private var mqttSection: some View {
         Section("MQTT contract") {
-            Text("Ingress: <prefix>/notifications/in/<source>")
+            Text("Ingress: <prefix>/notifications/inbox/<source>")
             Text("Acknowledgement: <prefix>/notifications/ack")
             Text(
                 "Allow publishers only on ingress and acknowledgement. MacTower's daemon needs publish access to notification state, events, panel state, availability, and Home Assistant discovery."

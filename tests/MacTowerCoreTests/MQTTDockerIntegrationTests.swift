@@ -286,7 +286,8 @@ struct MQTTDockerIntegrationTests {
         try await send(sender, topic: inbox, payload: Data("after-reconnect".utf8), retain: false)
         try await reconnectedCallbacks.waitForCount(1)
 
-        try await reconnected.publish([planner.clearActivePublication(eventID)])
+        // Leave this active publication in the disposable broker so the shell
+        // gate can prove that a fresh subscriber receives retained active state.
         try await send(sender, topic: inbox, payload: Data(), retain: true)
         try await send(sender, topic: ack, payload: Data(), retain: true)
         try await reconnected.disconnect()
