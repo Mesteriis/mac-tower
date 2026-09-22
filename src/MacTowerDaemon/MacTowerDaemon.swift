@@ -51,9 +51,12 @@ struct MacTowerDaemon {
                 isDirectory: true
             )
             let controller = try ManagementController(root: root)
-            runtime = try DaemonNetworkRuntime(root: root, controller: controller)
+            let windowControl = try WindowControlService(root: root)
+            runtime = try DaemonNetworkRuntime(
+                root: root, controller: controller, windowControl: windowControl)
             xpcServer = try DaemonXPCServer(
                 controller: controller,
+                windowControl: windowControl,
                 trustManifestURL: URL(
                     fileURLWithPath: "/Library/Preferences/dev.mactower.trust.json")
             )

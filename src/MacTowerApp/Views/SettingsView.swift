@@ -1,10 +1,14 @@
 import AppKit
 import MacTowerCore
+import MacTowerWindowControl
 import SwiftUI
 
 struct SettingsView: View {
     @AppStorage("showMenuBarTitle") private var showMenuBarTitle = false
-    @StateObject private var daemon = DaemonClient()
+    @ObservedObject var daemon: DaemonClient
+    @ObservedObject var windows: WindowController
+    @ObservedObject var windowBridge: WindowAgentBridge
+    @ObservedObject var loginItem: LoginItemController
 
     var body: some View {
         TabView {
@@ -13,6 +17,9 @@ struct SettingsView: View {
 
             NetworkSettingsView(daemon: daemon)
                 .tabItem { Label("Publishing", systemImage: "network") }
+
+            WindowsSettingsView(windows: windows, bridge: windowBridge, loginItem: loginItem)
+                .tabItem { Label("Windows", systemImage: "macwindow") }
 
             Form {
                 Section("Menu bar") {

@@ -7,18 +7,21 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     private let logger = Logger(subsystem: "dev.mactower", category: "network")
     private let storage: PrivateFileStore
     private let controller: ManagementController
+    private let windowControl: WindowControlService
     private let configuration: ServiceConfiguration
     private let mqttLedger: MQTTAdvertisementLedger
     private let snapshots = SnapshotStore()
     private var httpServer: SensorHTTPServer?
     private var mqttPublisher: HomeAssistantMQTTPublisher?
+    private var windowMQTT: WindowMQTTRuntime?
     private var mqttTask: Task<Void, Never>?
     private var collectionTask: Task<Void, Never>?
 
-    init(root: URL, controller: ManagementController) throws {
+    init(root: URL, controller: ManagementController, windowControl: WindowControlService) throws {
         storage = try PrivateFileStore(root: root)
         mqttLedger = try MQTTAdvertisementLedger(storage: storage)
         self.controller = controller
+        self.windowControl = windowControl
         if let data = try storage.read(named: "service.json") {
             configuration = try ServiceConfiguration.decodeValidated(data)
         } else {
@@ -56,7 +59,13 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
                 clientIdentifier: "mac-tower-\(Host.current().localizedName ?? "mac")"
             )
             mqttPublisher = publisher
+            let windowMQTT = try WindowMQTTRuntime(
+                service: windowControl, publisher: publisher, storage: storage,
+                topicPrefix: configuration.mqtt.topicPrefix
+            )
+            self.windowMQTT = windowMQTT
             mqttTask = Task { [weak self] in
+                await windowMQTT.start()
                 await self?.runMQTT(publisher)
             }
         }
@@ -79,6 +88,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     func stop() async {
         collectionTask?.cancel()
         mqttTask?.cancel()
+        await windowMQTT?.stop()
         if let publisher = mqttPublisher {
             let planner = HomeAssistantMQTTPlanner(topicPrefix: configuration.mqtt.topicPrefix)
             try? await publisher.publish([planner.availabilityPublication(online: false)])
@@ -104,11 +114,19 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
                     onHomeAssistantBirth: { [weak self] in
                         Task { await self?.publishHomeAssistantBirth() }
                     },
-                    onDisconnect: {
+                    onDisconnect: { [weak self] in
                         continuation.yield()
                         continuation.finish()
+                        Task { await self?.windowMQTT?.setConnected(false) }
+                    },
+                    onWindowCommand: { [weak self] topic, payload, retained in
+                        Task {
+                            await self?.windowMQTT?.receive(
+                                topic: topic, payload: payload, retained: retained)
+                        }
                     }
                 )
+                await windowMQTT?.setConnected(true)
                 failures = 0
                 let entries = await snapshots.all()
                 let publications = try planner.reconnectPublications(
@@ -129,6 +147,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
             } catch {
                 continuation.finish()
             }
+            await windowMQTT?.setConnected(false)
             guard !Task.isCancelled else { return }
             failures += 1
             logger.error("MQTT disconnected; retrying without logging credentials or payloads.")
@@ -138,6 +157,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     }
 
     private func publishHomeAssistantBirth() async {
+        await windowMQTT?.homeAssistantStarted()
         guard let mqttPublisher else { return }
         do {
             let entries = await snapshots.all()

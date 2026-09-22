@@ -1,6 +1,6 @@
 # MacTower
 
-MacTower is an open-source macOS 14+ menu bar app and root background service that publishes selected local AI-account telemetry to Home Assistant over read-only HTTP and MQTT.
+MacTower is an open-source macOS 14+ menu bar app and root background service that publishes selected local AI-account telemetry over read-only HTTP and MQTT. It can also move the active window between displays, locally or through explicitly enabled Home Assistant MQTT buttons.
 
 The first sensor release supports Codex, Claude Code, and DeepSeek. Cursor appears in settings as **Soon** and has no importer, authorization access, or network activity.
 
@@ -38,7 +38,7 @@ make check
 | --- | --- |
 | `make build` | Build all Swift targets. |
 | `make test` | Run Swift and CLI regression tests. |
-| `make test-mqtt-docker` | Start a disposable Mosquitto 2.x container and verify a retained MQTTNIO round trip. |
+| `make test-mqtt-docker` | Start a disposable loopback-only Mosquitto 2.x container and test telemetry, window-command delivery, retained-message rejection, and reconnection. |
 | `make check` | Build, test, lint, and validate resources and shell scripts. |
 | `make format` / `make lint` | Format or verify Swift sources. |
 | `make app` / `make run` | Package or run the development menu bar app. |
@@ -74,6 +74,26 @@ Other methods and unknown routes are rejected. HTTP is IPv4-only and requires an
 
 MQTT accepts a private IPv4 address, `localhost`, a single-label LAN hostname, or a `.local` hostname. It supports broker username/password, certificate-verified TLS, retained account state, availability, Home Assistant Discovery, reconnects, HA birth republishing, and durable retained-topic reconciliation. Removed accounts and deselected fields are tombstoned after the broker reconnects; the advertised-topic ledger advances only after successful publication.
 
+## Move the active window
+
+Open Settings → Windows and grant **Accessibility** to the installed MacTower app in macOS System Settings. Permission requests happen only when you press the local permission button. No Screen Recording permission is requested. The menu's **Move active window to** submenu lists connected logical displays. It captures the external focused window when the menu opens; opening MacTower's settings does not select some unrelated previous window.
+
+An ordinary, resizable window is fitted to the destination's working area, excluding the Dock and menu bar. Native fullscreen windows first leave fullscreen, move, then attempt to restore fullscreen. The operation reads back the result and can report partial success if an application restricts its frame or fullscreen restoration fails. There is one operation at a time, no queue or automatic retry, and a 20-second native deadline. The GUI/daemon allow a small additional reply timeout; a timeout does not prove that no window change occurred.
+
+Limitations: standard AX windows only; minimized windows, dialogs, ambiguous fullscreen states and Split View pairs are not supported. MacTower does not move arbitrary Spaces, use private Spaces APIs, or simulate keyboard/mouse input. Fullscreen capability varies by application. Display UUIDs, not list positions, select destinations; mirrored displays form one logical target. Disconnecting a target or changing the physical layout during an operation cancels remaining steps. Dock/menu working-area changes are refreshed between stages without invalidating physical topology.
+
+For Home Assistant, configure MQTT and separately enable **Allow Home Assistant to move windows** in Settings → Windows. This switch takes effect immediately, without restarting the daemon. Buttons have stable identities per installation/display. Grant write access to command topics only to trusted broker users, normally Home Assistant; publishing there grants control over your desktop. HTTP remains read-only.
+
+- Command topic: `<prefix>/window-control/<current-epoch>/<display-uuid>/move`, exact payload `PRESS`, QoS 0, non-retained. Use the Discovery button rather than hard-coding its changing epoch.
+- Result topic: `<prefix>/window-control/result`, non-retained JSON containing `requestID`, `displayID`, and `code`. It contains no window title, application list, or content.
+- Availability: both `<prefix>/availability` and `<prefix>/window-control/availability` must be `online`.
+
+Control requires the app running in the installation owner's active, unlocked console session. A five-second heartbeat lease, connection invalidation and per-stage session checks disable stale control. Reconnection, lock/session changes and opt-in changes invalidate old command epochs; retained commands are rejected. Commands are never held for the next login/unlock. AI telemetry continues while window control is unavailable. Removed displays/disabled control clean up their own retained Discovery records without removing AI sensors.
+
+Settings → Windows offers **Open MacTower at login** through macOS Service Management. This is an explicit user preference, separate from the root daemon. An ad-hoc rebuild can require granting Accessibility again; reinstall to refresh trusted XPC hashes. On an uninstalled development bundle, local menu control can work after permission is granted, but daemon-backed controls remain unavailable.
+
+The lock gate requires an explicit boolean `false` from `IOConsoleLocked` together with matching console-session identity. This registry key is an internal macOS compatibility interface, not a stable public API: missing or unrecognized state disables control. Check lock/unlock on each supported macOS version; there is no atomic transaction between checking the session and sending an AX message.
+
 ## Runtime and data
 
 The GUI runs in the logged-in user session. The LaunchDaemon runs as root so Codex, DeepSeek, HTTP, and MQTT continue after logout. Claude remains user-session dependent because its official CLI produces statusline telemetry.
@@ -84,7 +104,9 @@ See [architecture](docs/architecture.md), [security](SECURITY.md), and [contribu
 
 ## Validation scope
 
-`make check` uses anonymized fixtures and local lifecycle dry-runs. `make test-mqtt-docker` separately exercises a real local broker. Neither proves live OAuth, real-account quota responses, LaunchDaemon operation after logout, or notarized distribution; those require explicit manual testing on an installed system.
+`make check` uses anonymized fixtures, injected window backends, command-routing/bridge tests, and local lifecycle dry-runs. `make test-mqtt-docker` separately exercises a real local broker. Neither proves live OAuth, real-account quota responses, installed XPC signature enforcement, LaunchDaemon operation after logout, or native window behavior.
+
+Before deployment, manually check an installed build with two or more displays: ordinary/fullscreen Safari, Terminal and an Electron app; mixed scaling/vertical layout; unplugging a destination; lock/unlock and locking during fullscreen transition; fast user switching; login-item registration; Accessibility revocation; and an ad-hoc upgrade. Live GUI/AX, signed XPC and login/logout acceptance remain separate from mocked and broker tests.
 
 ## License
 

@@ -16,6 +16,11 @@ let package = Package(
     targets: [
         .target(name: "MacTowerCore", path: "src/MacTowerCore"),
         .target(
+            name: "MacTowerWindowControl",
+            dependencies: ["MacTowerCore"],
+            path: "src/MacTowerWindowControl"
+        ),
+        .target(
             name: "MacTowerTransport",
             dependencies: [
                 "MacTowerCore",
@@ -28,7 +33,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "MacTowerApp",
-            dependencies: ["MacTowerCore"],
+            dependencies: ["MacTowerCore", "MacTowerWindowControl"],
             path: "src/MacTowerApp"
         ),
         .executableTarget(
@@ -40,6 +45,16 @@ let package = Package(
             name: "MacTowerClaudeBridge",
             dependencies: ["MacTowerCore"],
             path: "src/MacTowerClaudeBridge"
+        ),
+        .testTarget(
+            name: "MacTowerAppTests",
+            dependencies: ["MacTowerApp", "MacTowerCore", "MacTowerWindowControl"],
+            path: "tests/MacTowerAppTests"
+        ),
+        .testTarget(
+            name: "MacTowerWindowControlTests",
+            dependencies: ["MacTowerCore", "MacTowerWindowControl"],
+            path: "tests/MacTowerWindowControlTests"
         ),
         .testTarget(
             name: "MacTowerCoreTests",

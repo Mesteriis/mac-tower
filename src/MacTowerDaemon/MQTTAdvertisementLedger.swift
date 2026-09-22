@@ -3,11 +3,12 @@ import MacTowerCore
 
 actor MQTTAdvertisementLedger {
     private let storage: PrivateFileStore
-    private let fileName = "mqtt-advertised-topics.json"
+    private let fileName: String
     private var topics: Set<String>
 
-    init(storage: PrivateFileStore) throws {
+    init(storage: PrivateFileStore, fileName: String = "mqtt-advertised-topics.json") throws {
         self.storage = storage
+        self.fileName = fileName
         if let data = try storage.read(named: fileName) {
             topics = Set(try JSONDecoder().decode([String].self, from: data))
         } else {

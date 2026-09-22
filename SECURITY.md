@@ -4,7 +4,19 @@
 
 MacTower deliberately provides no application-level authentication on its HTTP sensor endpoints. Enabling HTTP authorizes every client in the configured IPv4 allowlist to read the published telemetry. Never bind it to a public, VPN-wide, or otherwise untrusted network. MQTT security is provided by the configured local broker; use broker credentials and certificate-verified TLS where appropriate.
 
-There are no HTTP or MQTT management operations. Login, secrets, configuration, and account removal are available only through the local XPC management contract.
+HTTP has no management operations. Login, secrets, configuration, and account removal remain available only through the local XPC management contract. MQTT additionally supports one explicitly opted-in action: moving the current focused window to a connected display. The window-control preference is off by default, stored separately from network configuration, and changes immediately.
+
+## Window-control boundary
+
+The root daemon never performs Accessibility operations. A persistent, mutually cdhash-pinned XPC connection registers a user-session controller belonging to the installation owner's UID. There may be only one live registered controller; heartbeat leases expire after five seconds. GUI exit/disconnection and invalid session state revoke routing. The app still requires the user's separate Accessibility consent; root does not bypass TCC.
+
+The MQTT broker is the authority for network window commands. Restrict publisher ACLs on `<prefix>/window-control/+/+/move` to trusted Home Assistant clients. The opt-in switch does not authenticate an MQTT sender; an anonymous or overly permissive broker grants other clients the same desktop-control capability. Use broker credentials and certificate-verified TLS on untrusted shared links. There is no new unauthenticated HTTP command API or shell-command interface.
+
+Commands use QoS 0, clean MQTT sessions with zero session expiry, subscription retain handling `doNotSend`, and retained-flag rejection. Epoch-qualified topics prevent old commands targeting a later session. The epoch is not a secret or authentication token. It is also checked across XPC, alongside the GUI's topology/session generation. Offline commands are discarded rather than queued. Duplicate GUI request IDs and overlapping operations are rejected.
+
+Each AX-changing stage rechecks permission, active owner/console session, deadline, target topology, and cancellation. The lock adapter accepts only a real boolean `false` from the internal `IOConsoleLocked` registry property. Missing, mistyped, or unknown state fails closed. This is a compatibility dependency, not a documented lock-state API or an atomic guarantee against a lock transition racing an AX request. No restoration steps are deliberately performed after detected lock/cancellation.
+
+Window titles, application names/lists, paths, and window contents are not part of public command/result models or logs. Display names are published by Discovery. The finite command cannot specify a process, executable, shell string, arbitrary AX attribute, or arbitrary coordinates.
 
 ## Privileged installation
 
@@ -12,7 +24,7 @@ The GUI runs as the installation owner's UID. The LaunchDaemon runs as root. Loc
 
 - the daemon accepts XPC clients only when both the effective UID and app cdhash match;
 - the app accepts the daemon only when its cdhash matches;
-- management operations are a finite Codable enum and never accept commands or executable paths.
+- account management operations use a finite Codable enum; window callbacks also have a fixed contract. Neither accepts shell commands or executable paths.
 
 An ad-hoc hash is installation pinning, not a public identity or notarization. Rebuilding changes it; reinstall to update both trusted hashes. The project does not claim protection if an attacker already has root access.
 
@@ -31,6 +43,9 @@ Provider credentials, provider email addresses, raw responses, project paths, tr
 ## Known limitations
 
 - Local development builds are not Developer ID signed or notarized.
+- Native fullscreen uses capability-checked `AXFullScreen`, which is not uniformly supported. Split View pairs and arbitrary Spaces are not managed. A partially completed operation is not rolled back automatically.
+- Accessibility grants and Service Management login-item approval are controlled by macOS. An ad-hoc update may require reapproval and always requires updating the trusted installation hashes.
+- Lock detection, native AX operation and live signed duplex XPC require manual acceptance on supported macOS versions. Synthetic backends do not prove those integrations.
 - IPv6 publishing is not implemented.
 - An allowlisted network is a trust grant; RFC1918 addressing alone does not make its devices trustworthy.
 - Network listener changes require a daemon restart.

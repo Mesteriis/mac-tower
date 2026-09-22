@@ -262,4 +262,14 @@ public enum TrustManifestError: Error, Equatable {
         _ request: Data,
         withReply reply: @escaping @Sendable (Data?, String?) -> Void
     )
+
+    func updateWindowAgent(
+        _ snapshot: Data,
+        withReply reply: @escaping @Sendable (Data?, String?) -> Void
+    )
+
+    func setWindowControlEnabled(
+        _ enabled: Bool,
+        withReply reply: @escaping @Sendable (Data?, String?) -> Void
+    )
 }

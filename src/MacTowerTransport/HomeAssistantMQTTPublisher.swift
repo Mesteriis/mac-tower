@@ -7,6 +7,7 @@ import MacTowerCore
 public actor HomeAssistantMQTTPublisher {
     private let client: MQTTClient
     private let availabilityTopic: String
+    private let windowCommandPrefix: String
     private let listenerName = "mac-tower-home-assistant-birth"
     private let closeListenerName = "mac-tower-reconnect"
     private var connected = false
@@ -17,6 +18,7 @@ public actor HomeAssistantMQTTPublisher {
         clientIdentifier: String
     ) {
         availabilityTopic = "\(configuration.topicPrefix)/availability"
+        windowCommandPrefix = "\(configuration.topicPrefix)/window-control/"
         client = MQTTClient(
             host: configuration.host,
             port: configuration.port,
@@ -33,13 +35,15 @@ public actor HomeAssistantMQTTPublisher {
 
     public func connect(
         onHomeAssistantBirth: @escaping @Sendable () -> Void,
-        onDisconnect: @escaping @Sendable () -> Void
+        onDisconnect: @escaping @Sendable () -> Void,
+        onWindowCommand: (@Sendable (String, Data, Bool) -> Void)? = nil
     ) async throws {
         guard !connected else { return }
         var offline = ByteBufferAllocator().buffer(capacity: 7)
         offline.writeString("offline")
         _ = try await client.v5.connect(
-            cleanStart: false,
+            cleanStart: true,
+            properties: [.sessionExpiryInterval(0)],
             will: (
                 topicName: availabilityTopic,
                 payload: offline,
@@ -48,13 +52,28 @@ public actor HomeAssistantMQTTPublisher {
                 properties: .init()
             )
         )
+        let windowCommandPrefix = self.windowCommandPrefix
         client.addPublishListener(named: listenerName) { result in
-            guard case .success(let info) = result,
-                info.topicName == "homeassistant/status"
-            else { return }
-            var payload = info.payload
-            if payload.readString(length: payload.readableBytes) == "online" {
-                onHomeAssistantBirth()
+            guard case .success(let info) = result else { return }
+            if info.topicName == "homeassistant/status" {
+                var payload = info.payload
+                if payload.readableBytes == 6,
+                    payload.readString(length: payload.readableBytes) == "online"
+                {
+                    onHomeAssistantBirth()
+                }
+            } else if let onWindowCommand,
+                info.payload.readableBytes <= WindowMQTTPlanner.maximumCommandPayloadBytes,
+                info.topicName.utf8.count <= windowCommandPrefix.utf8.count + 78,
+                info.topicName.hasPrefix(windowCommandPrefix)
+            {
+                let components = info.topicName.dropFirst(windowCommandPrefix.count)
+                    .split(separator: "/", omittingEmptySubsequences: false)
+                guard components.count == 3, components[2] == "move",
+                    UUID(uuidString: String(components[0])) != nil,
+                    UUID(uuidString: String(components[1])) != nil
+                else { return }
+                onWindowCommand(info.topicName, Data(info.payload.readableBytesView), info.retain)
             }
         }
         client.addCloseListener(named: closeListenerName) { [weak self] _ in
@@ -62,7 +81,13 @@ public actor HomeAssistantMQTTPublisher {
             onDisconnect()
         }
         _ = try await client.v5.subscribe(
-            to: [.init(topicFilter: "homeassistant/status", qos: .atLeastOnce)]
+            to: [
+                .init(topicFilter: "homeassistant/status", qos: .atLeastOnce),
+                .init(
+                    topicFilter: "\(windowCommandPrefix)+/+/move", qos: .atMostOnce,
+                    retainAsPublished: true, retainHandling: .doNotSend
+                ),
+            ]
         )
         connected = true
     }

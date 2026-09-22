@@ -30,7 +30,7 @@ if [[ ! "$port" =~ ^[0-9]+$ ]]; then
 fi
 
 MACTOWER_MQTT_TEST_PORT="$port" \
-    "$project_root/src/scripts/test.sh" --filter mqttDockerRoundTrip
+    "$project_root/src/scripts/test.sh" --filter MQTTDockerIntegrationTests
 
 payload="$(docker exec "$container" mosquitto_sub \
     -h 127.0.0.1 -t mac_tower_test/integration/state -C 1 -W 5)"
@@ -39,4 +39,4 @@ if [[ "$payload" != '{"status":"ok"}' ]]; then
     exit 1
 fi
 
-printf 'PASS: MQTTNIO retained round trip through Docker Mosquitto.\n'
+printf 'PASS: MQTTNIO retained state, fresh sessions, and nonreplayed window commands through Docker Mosquitto.\n'
