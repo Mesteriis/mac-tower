@@ -8,6 +8,47 @@ public enum ManagementOperation: String, Codable, Sendable {
     case cancelCodexOAuth = "cancel_codex_oauth"
     case linkClaudeProfile = "link_claude_profile"
     case removeAccount = "remove_account"
+    case setPowerMode = "set_power_mode"
+}
+
+public enum PowerMode: String, Codable, CaseIterable, Equatable, Sendable {
+    case normal
+    case keepMacAwake = "keep_mac_awake"
+    case keepMacAndDisplaysAwake = "keep_mac_and_displays_awake"
+}
+
+public enum PowerControlIssue: String, Codable, Equatable, Sendable {
+    case invalidSettings = "invalid_settings"
+    case persistenceFailed = "persistence_failed"
+    case assertionCreateFailed = "assertion_create_failed"
+    case assertionReleaseFailed = "assertion_release_failed"
+}
+
+public struct PowerControlStatus: Codable, Equatable, Sendable {
+    public let requestedMode: PowerMode
+    public let persistedMode: PowerMode?
+    public let appliedMode: PowerMode
+    public let issue: PowerControlIssue?
+
+    public init(
+        requestedMode: PowerMode,
+        persistedMode: PowerMode?,
+        appliedMode: PowerMode,
+        issue: PowerControlIssue? = nil
+    ) {
+        self.requestedMode = requestedMode
+        self.persistedMode = persistedMode
+        self.appliedMode = appliedMode
+        self.issue = issue
+    }
+}
+
+public struct SetPowerModeRequest: Codable, Equatable, Sendable {
+    public let mode: PowerMode
+
+    public init(mode: PowerMode) {
+        self.mode = mode
+    }
 }
 
 public struct ManagementEnvelope: Codable, Sendable {
@@ -208,6 +249,7 @@ public struct DaemonStatus: Codable, Sendable {
     public let configuration: ServiceConfiguration
     public let accounts: [AccountRegistration]
     public let activeCodexOAuthAccountID: AccountID?
+    public let powerControl: PowerControlStatus?
 
     public init(
         running: Bool,
@@ -215,7 +257,8 @@ public struct DaemonStatus: Codable, Sendable {
         mqttEnabled: Bool,
         configuration: ServiceConfiguration,
         accounts: [AccountRegistration],
-        activeCodexOAuthAccountID: AccountID? = nil
+        activeCodexOAuthAccountID: AccountID? = nil,
+        powerControl: PowerControlStatus? = nil
     ) {
         self.running = running
         self.httpEnabled = httpEnabled
@@ -223,6 +266,7 @@ public struct DaemonStatus: Codable, Sendable {
         self.configuration = configuration
         self.accounts = accounts
         self.activeCodexOAuthAccountID = activeCodexOAuthAccountID
+        self.powerControl = powerControl
     }
 }
 

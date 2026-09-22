@@ -150,6 +150,9 @@ private final class ManagementXPCService: NSObject, MacTowerDaemonXPCProtocol, @
                 try decoder.decode(
                     RemoveAccountRequest.self, from: requiredPayload(envelope)))
             return Data("{}".utf8)
+        case .setPowerMode:
+            // The daemon implementation is added with the power assertion owner.
+            throw ManagementControllerError.invalidRequest
         }
     }
 
