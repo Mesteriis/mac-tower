@@ -94,6 +94,20 @@ Settings → Windows offers **Open MacTower at login** through macOS Service Man
 
 The lock gate requires an explicit boolean `false` from `IOConsoleLocked` together with matching console-session identity. This registry key is an internal macOS compatibility interface, not a stable public API: missing or unrecognized state disables control. Check lock/unlock on each supported macOS version; there is no atomic transaction between checking the session and sending an AX message.
 
+## Control idle sleep
+
+The menu's **Sleep mode** submenu and Settings → General offer the same persistent three-position control:
+
+- **Normal** holds no MacTower power assertion.
+- **Keep Mac awake** lets displays turn off normally but prevents idle system sleep.
+- **Keep Mac and displays awake** prevents idle display sleep as well as the resulting idle system sleep.
+
+The root daemon owns the assertion, so the selected non-normal mode continues after the menu app quits and after logout. The saved choice is restored when the daemon starts. `make uninstall` removes the daemon and therefore releases its live assertion, but preserves the saved choice with the other MacTower data; reinstalling restores it. Return to **Normal** before uninstalling if you do not want a later reinstall to restore a keep-awake mode.
+
+Non-normal modes use more energy, especially on battery. They prevent only idle sleep: MacTower does not defeat manual sleep, lid-close sleep, critical-battery protection, screen locking, or Dark Wake behavior. Selecting the display-awake mode does not wake a display that is already off. Assertion failures are shown as requested/saved/applied mismatches instead of being reported as success.
+
+Sleep-mode changes use the authenticated local XPC contract and are never exposed through HTTP or MQTT. Rebuilding either side of that installed contract changes its pinned hash; run `make install` again before testing a new build.
+
 ## Runtime and data
 
 The GUI runs in the logged-in user session. The LaunchDaemon runs as root so Codex, DeepSeek, HTTP, and MQTT continue after logout. Claude remains user-session dependent because its official CLI produces statusline telemetry.
@@ -104,9 +118,9 @@ See [architecture](docs/architecture.md), [security](SECURITY.md), and [contribu
 
 ## Validation scope
 
-`make check` uses anonymized fixtures, injected window backends, command-routing/bridge tests, and local lifecycle dry-runs. `make test-mqtt-docker` separately exercises a real local broker. Neither proves live OAuth, real-account quota responses, installed XPC signature enforcement, LaunchDaemon operation after logout, or native window behavior.
+`make check` uses anonymized fixtures, injected window and power backends, command-routing/bridge tests, and local lifecycle dry-runs. It does not install the daemon or create a real power assertion. `make test-mqtt-docker` separately exercises a real local broker. Neither proves live OAuth, real-account quota responses, installed XPC signature enforcement, LaunchDaemon operation after logout, native window behavior, or native sleep behavior.
 
-Before deployment, manually check an installed build with two or more displays: ordinary/fullscreen Safari, Terminal and an Electron app; mixed scaling/vertical layout; unplugging a destination; lock/unlock and locking during fullscreen transition; fast user switching; login-item registration; Accessibility revocation; and an ad-hoc upgrade. Live GUI/AX, signed XPC and login/logout acceptance remain separate from mocked and broker tests.
+Before deployment, manually check an installed build with two or more displays: ordinary/fullscreen Safari, Terminal and an Electron app; mixed scaling/vertical layout; unplugging a destination; lock/unlock and locking during fullscreen transition; fast user switching; login-item registration; Accessibility revocation; and an ad-hoc upgrade. Separately verify all three sleep modes, an already-off display, AC/battery transitions, manual sleep/wake, lock/logout, daemon restart, return to Normal, and assertion cleanup. Live GUI/AX, IOKit, signed XPC and login/logout acceptance remain separate from mocked and broker tests.
 
 ## License
 

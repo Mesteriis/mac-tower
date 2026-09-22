@@ -18,6 +18,14 @@ Each AX-changing stage rechecks permission, active owner/console session, deadli
 
 Window titles, application names/lists, paths, and window contents are not part of public command/result models or logs. Display names are published by Discovery. The finite command cannot specify a process, executable, shell string, arbitrary AX attribute, or arbitrary coordinates.
 
+## Power-control boundary
+
+Sleep-mode mutation is available only through the authenticated local XPC management contract. It adds no HTTP route, MQTT command, shell command, or other LAN mutation. The finite request selects only `normal`, `keep_mac_awake`, or `keep_mac_and_displays_awake`; callers cannot provide an assertion type, assertion name, duration, or arbitrary IOKit value.
+
+The root daemon is the sole power-assertion owner. Its IOKit assertion names are fixed strings containing no account, user, host, or other user-controlled data. Public status and normal logs expose only finite issue codes; raw IOKit return values and handles do not cross XPC or enter LAN telemetry. Shutdown attempts to release MacTower assertions before stopping network services. The OS also scopes assertions to the daemon process; MacTower never enumerates or removes assertions owned by other processes.
+
+The selected mode is stored in the existing private root data directory. Uninstalling stops the owner and releases its live assertion while preserving the saved selection; purging data remains a separate explicit action. Reinstalling or restarting can therefore restore a saved non-normal mode.
+
 ## Privileged installation
 
 The GUI runs as the installation owner's UID. The LaunchDaemon runs as root. Local OSS builds use ad-hoc hardened-runtime signatures, so the installer records exact app and daemon cdhash values in a root-owned, non-writable trust manifest:
@@ -49,6 +57,8 @@ Provider credentials, provider email addresses, raw responses, project paths, tr
 - IPv6 publishing is not implemented.
 - An allowlisted network is a trust grant; RFC1918 addressing alone does not make its devices trustworthy.
 - Network listener changes require a daemon restart.
+- Keep-awake modes prevent idle sleep only. They do not override manual sleep, lid-close sleep, critical-battery protection, screen locking, or Dark Wake, and they do not wake an already-off display.
+- Unit tests inject a fake assertion backend. Native IOKit assertion creation, release, restoration after daemon restart/logout, and battery behavior require manual acceptance.
 - Claude telemetry is last-seen statusline data, not an autonomous provider poll. It can become stale after the CLI or user session stops.
 - Unit fixtures and installer dry-runs do not replace manual testing with real accounts, an installed LaunchDaemon, logout, or a real MQTT broker.
 

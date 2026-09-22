@@ -8,6 +8,7 @@
 | `MacTowerCore` | Shared | Public sensor model, provider parsers/clients, storage boundaries, HTTP routing, MQTT planning, management DTOs, and validation. |
 | `MacTowerTransport` | Root daemon | SwiftNIO HTTP server and MQTTNIO publisher. |
 | `MacTowerWindowControl` | Logged-in user | Display topology, session eligibility, bounded Accessibility adapter and a single app-lifetime window controller. |
+| `MacTowerPowerControl` | Root daemon | Versioned mode storage, serialized assertion state machine, and the public IOKit assertion adapter. |
 | `MacTowerDaemon` | Root LaunchDaemon | Account registry, polling, snapshots, Codex processes, XPC service, HTTP, and MQTT. |
 | `mac-tower-claude-bridge` | Claude user's statusline | Filters Claude's stdin JSON into one account snapshot without reading credentials. |
 
@@ -22,6 +23,7 @@ Claude user statusline snapshot ───────────┘            
 
 Menu bar app ── UID + app cdhash ──> finite XPC service
 Menu bar app <─ daemon cdhash ────── root LaunchDaemon
+Local GUI ─> authenticated XPC ─> root assertion owner ─> IOKit
 
 Home Assistant button ─> MQTT command router ─> pinned duplex XPC ─> user WindowController ─> AX window
 ```
@@ -44,6 +46,14 @@ The installer applies hardened-runtime ad-hoc signing and records app/daemon cdh
 
 This design is appropriate for a local OSS build, not a substitute for Developer ID signing and notarization.
 
+## Power control
+
+`PowerControlService` is created once by the root daemon and is injected into both status/mutation routing and daemon shutdown. It serializes every transition, persists a versioned finite `PowerMode`, and owns at most the assertion handles needed for the applied mode. Tests use an injected backend; only daemon construction creates `IOKitPowerAssertionBackend`.
+
+Normal mode owns no assertion. Keep-Mac-awake maps to the public idle-system-sleep assertion; keep-Mac-and-displays-awake maps to the public idle-display-sleep assertion. Transitions acquire the new assertion before releasing the old one. Requested, persisted, and applied modes remain separate so storage, creation, and release failures cannot be mistaken for success. On SIGTERM/SIGINT, assertion release runs before network shutdown. The saved mode is not changed by shutdown, so a later daemon start restores it.
+
+The app sends a single finite mutation over the existing mutually pinned XPC connection and never retries it automatically. A three-second reply ledger bounds disconnects and late replies; after an ambiguous failure the UI retains its last confirmed value, reads current status, and reports that the write was not confirmed. No power-control operation is routed through HTTP, MQTT, the window-control bridge, or a user-session assertion.
+
 ## Network publication
 
 HTTP routing is read-only and testable independently from NIO. Only `/health`, `/v1/accounts`, and `/v1/sensors` accept `GET`; the peer address must match an explicit local IPv4 CIDR. HTTP and MQTT are disabled by default.
@@ -58,6 +68,6 @@ An independent one-second control-publication loop keeps GUI availability and Di
 
 ## Installation and lifecycle
 
-`make install` is the only install path. It stages the app, installs root-owned helper binaries and the LaunchDaemon plist, pins the selected Codex binary, records trust hashes, and bootstraps launchd. Ordinary builds make no system changes. `make uninstall` stops the service and removes installed code while preserving `/Library/Application Support/MacTower`; `make purge-data` handles destructive data removal separately.
+`make install` is the only install path. It stages the app, installs root-owned helper binaries and the LaunchDaemon plist, pins the selected Codex binary, records trust hashes, and bootstraps launchd. Ordinary builds make no system changes. Changes to the app/daemon XPC contract require reinstalling both trusted hashes. `make uninstall` stops the service, releases process-owned assertions, and removes installed code while preserving `/Library/Application Support/MacTower`, including the saved sleep mode; `make purge-data` handles destructive data removal separately.
 
-Automated tests cover parsers, missing fields, exact money strings, snapshot freshness, secret-free public JSON, local ACLs, HTTP method rejection, MQTT plans/tombstones, storage isolation, Claude bridge restoration, XPC DTO trust requirements, CLI privilege behavior, and install/uninstall/purge dry-runs. The optional Docker test verifies a retained MQTTNIO round trip through Mosquitto. Real OAuth, signing/launchd integration, logout operation, and production broker configuration remain manual acceptance checks.
+Automated tests cover parsers, missing fields, exact money strings, snapshot freshness, secret-free public JSON, local ACLs, HTTP method rejection, MQTT plans/tombstones, storage isolation, Claude bridge restoration, XPC DTO trust requirements, power transitions through an injected backend, release-before-network ordering, CLI privilege behavior, and install/uninstall/purge dry-runs. The optional Docker test verifies a retained MQTTNIO round trip through Mosquitto. Native IOKit behavior, real OAuth, signing/launchd integration, logout operation, and production broker configuration remain manual acceptance checks.
