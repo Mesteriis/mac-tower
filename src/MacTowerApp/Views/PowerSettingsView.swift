@@ -46,7 +46,7 @@ struct PowerSettingsView: View {
 
     private var selection: Binding<PowerMode> {
         Binding(
-            get: { daemon.powerStatus?.requestedMode ?? .normal },
+            get: { daemon.powerPresentation.displayedMode ?? .normal },
             set: { mode in Task { await daemon.setPowerMode(mode) } }
         )
     }

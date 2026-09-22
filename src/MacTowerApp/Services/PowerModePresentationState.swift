@@ -7,6 +7,10 @@ struct PowerModePresentationState: Equatable {
     private(set) var errorMessage: String?
     private var pendingRequestID: UUID?
 
+    var displayedMode: PowerMode? {
+        pendingMode ?? confirmedStatus?.requestedMode
+    }
+
     init(confirmedStatus: PowerControlStatus? = nil) {
         self.confirmedStatus = confirmedStatus
     }

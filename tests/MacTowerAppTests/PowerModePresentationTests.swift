@@ -27,10 +27,12 @@ struct PowerModePresentationTests {
         var state = PowerModePresentationState(confirmedStatus: original)
         let request = state.begin(.keepMacAwake)
         #expect(state.pendingMode == .keepMacAwake)
+        #expect(state.displayedMode == .keepMacAwake)
         let confirmed = state.confirm(replacement, requestID: request)
         #expect(confirmed)
         #expect(state.confirmedStatus == replacement)
         #expect(state.pendingMode == nil)
+        #expect(state.displayedMode == .keepMacAwake)
         #expect(state.errorMessage == nil)
     }
 
@@ -42,6 +44,7 @@ struct PowerModePresentationTests {
         #expect(failed)
         #expect(state.confirmedStatus == original)
         #expect(state.pendingMode == nil)
+        #expect(state.displayedMode == .normal)
         #expect(state.errorMessage == "Timed out")
         state.observe(original)
         #expect(state.errorMessage == "Timed out")
