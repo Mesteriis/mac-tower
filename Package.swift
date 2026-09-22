@@ -43,7 +43,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MacTowerCoreTests",
-            dependencies: ["MacTowerCore"],
+            dependencies: ["MacTowerCore", "MacTowerTransport"],
             path: "tests/MacTowerCoreTests"
         ),
     ]

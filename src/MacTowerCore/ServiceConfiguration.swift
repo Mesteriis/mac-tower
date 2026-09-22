@@ -3,9 +3,12 @@ import Foundation
 
 public enum ServiceConfigurationError: Error, Equatable {
     case invalidPollInterval
+    case invalidStaleInterval
     case invalidCIDR
     case invalidAccountID
     case invalidPort
+    case invalidHost
+    case invalidTopic
 }
 
 public struct HTTPServiceConfiguration: Codable, Equatable, Sendable {
@@ -47,6 +50,14 @@ public struct MQTTServiceConfiguration: Codable, Equatable, Sendable {
         topicPrefix: String = "mac_tower"
     ) throws {
         guard (1...65_535).contains(port) else { throw ServiceConfigurationError.invalidPort }
+        guard host.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9.-]{0,252}/) != nil else {
+            throw ServiceConfigurationError.invalidHost
+        }
+        guard topicPrefix.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}/) != nil,
+            !topicPrefix.contains("//")
+        else {
+            throw ServiceConfigurationError.invalidTopic
+        }
         self.enabled = enabled
         self.host = host
         self.port = port
@@ -72,8 +83,14 @@ public struct ServiceConfiguration: Codable, Equatable, Sendable {
         guard (60...86_400).contains(pollIntervalSeconds) else {
             throw ServiceConfigurationError.invalidPollInterval
         }
+        let resolvedStaleAfter = staleAfterSeconds ?? pollIntervalSeconds * 3
+        guard resolvedStaleAfter >= pollIntervalSeconds,
+            resolvedStaleAfter <= 604_800
+        else {
+            throw ServiceConfigurationError.invalidStaleInterval
+        }
         self.pollIntervalSeconds = pollIntervalSeconds
-        self.staleAfterSeconds = staleAfterSeconds ?? pollIntervalSeconds * 3
+        self.staleAfterSeconds = resolvedStaleAfter
         self.http = try http ?? HTTPServiceConfiguration()
         self.mqtt = try mqtt ?? MQTTServiceConfiguration()
     }
@@ -103,7 +120,20 @@ public struct ServiceConfiguration: Codable, Equatable, Sendable {
                 passwordSecretName: decoded.mqtt.passwordSecretName,
                 topicPrefix: decoded.mqtt.topicPrefix
             )
-        )
+        ).validateForActivation()
+    }
+
+    @discardableResult
+    public func validateForActivation() throws -> ServiceConfiguration {
+        if http.enabled {
+            guard !http.allowedNetworks.isEmpty,
+                http.allowedNetworks.allSatisfy(\.isLocalNetwork),
+                http.allowedNetworks.contains(where: { $0.contains(http.bindAddress) })
+            else {
+                throw ServiceConfigurationError.invalidCIDR
+            }
+        }
+        return self
     }
 }
 
@@ -159,6 +189,13 @@ public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
             "\((network >> 24) & 0xff).\((network >> 16) & 0xff).\((network >> 8) & 0xff).\(network & 0xff)/\(prefixLength)"
     }
 
+    public var isLocalNetwork: Bool {
+        let end = network | ~Self.mask(prefixLength: prefixLength)
+        return Self.localBlocks.contains { block in
+            network >= block.start && end <= block.end
+        }
+    }
+
     public init(from decoder: Decoder) throws {
         try self.init(decoder.singleValueContainer().decode(String.self))
     }
@@ -178,6 +215,14 @@ public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
         guard prefixLength > 0 else { return 0 }
         return UInt32.max << (32 - UInt32(prefixLength))
     }
+
+    private static let localBlocks: [(start: UInt32, end: UInt32)] = [
+        (0x0A00_0000, 0x0AFF_FFFF),
+        (0xAC10_0000, 0xAC1F_FFFF),
+        (0xC0A8_0000, 0xC0A8_FFFF),
+        (0x7F00_0000, 0x7FFF_FFFF),
+        (0xA9FE_0000, 0xA9FE_FFFF),
+    ]
 }
 
 public struct ManagedAccountPaths: Sendable {

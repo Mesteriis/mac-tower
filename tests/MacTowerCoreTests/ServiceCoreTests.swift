@@ -11,6 +11,9 @@ struct ServiceCoreTests {
         #expect(throws: ServiceConfigurationError.self) {
             try ServiceConfiguration(pollIntervalSeconds: 59)
         }
+        #expect(throws: ServiceConfigurationError.self) {
+            try ServiceConfiguration(pollIntervalSeconds: 300, staleAfterSeconds: 10)
+        }
 
         let configuration = try ServiceConfiguration(pollIntervalSeconds: 300)
         #expect(!configuration.http.enabled)

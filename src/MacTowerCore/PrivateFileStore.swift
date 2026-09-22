@@ -68,6 +68,14 @@ public struct PrivateFileStore: Sendable {
         return try FileHandle(fileDescriptor: descriptor, closeOnDealloc: true).readToEnd()
     }
 
+    public func remove(named name: String) throws {
+        let file = try fileURL(named: name)
+        if Self.isSymbolicLink(file.path) { throw PrivateFileStoreError.ioFailure }
+        if unlink(file.path) != 0, errno != ENOENT {
+            throw PrivateFileStoreError.ioFailure
+        }
+    }
+
     private func fileURL(named name: String) throws -> URL {
         guard name.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._-]{0,127}/) != nil else {
             throw PrivateFileStoreError.invalidName

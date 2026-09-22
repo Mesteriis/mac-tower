@@ -28,7 +28,7 @@ struct MacTowerDaemon {
                 --help       Show this help.
                 --version    Show the version.
 
-                This scaffold does not expose network endpoints or execute commands.
+                Network publishing is disabled until configured through the menu bar app.
                 """)
         case .version:
             print("mac-tower-daemon 0.1.0")
@@ -44,11 +44,20 @@ struct MacTowerDaemon {
         }
 
         let runtime: DaemonNetworkRuntime
+        let xpcServer: DaemonXPCServer
         do {
-            runtime = try DaemonNetworkRuntime(
-                root: URL(
-                    fileURLWithPath: "/Library/Application Support/MacTower", isDirectory: true)
+            let root = URL(
+                fileURLWithPath: "/Library/Application Support/MacTower",
+                isDirectory: true
             )
+            let controller = try ManagementController(root: root)
+            runtime = try DaemonNetworkRuntime(root: root, controller: controller)
+            xpcServer = try DaemonXPCServer(
+                controller: controller,
+                trustManifestURL: URL(
+                    fileURLWithPath: "/Library/Preferences/dev.mactower.trust.json")
+            )
+            xpcServer.start()
             try runtime.start()
         } catch {
             writeError("Failed to start service. Configuration or storage is invalid.")
@@ -82,7 +91,7 @@ struct MacTowerDaemon {
         logger.info("Daemon started.")
 
         // Keep signal sources alive while dispatch sleeps until an event arrives.
-        withExtendedLifetime((terminationSource, interruptSource, runtime)) {
+        withExtendedLifetime((terminationSource, interruptSource, runtime, xpcServer)) {
             dispatchMain()
         }
     }

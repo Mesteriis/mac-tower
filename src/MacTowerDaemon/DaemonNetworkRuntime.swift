@@ -6,14 +6,17 @@ import OSLog
 final class DaemonNetworkRuntime: @unchecked Sendable {
     private let logger = Logger(subsystem: "dev.mactower", category: "network")
     private let storage: PrivateFileStore
+    private let controller: ManagementController
     private let configuration: ServiceConfiguration
     private let snapshots = SnapshotStore()
     private var httpServer: SensorHTTPServer?
     private var mqttPublisher: HomeAssistantMQTTPublisher?
     private var mqttTask: Task<Void, Never>?
+    private var collectionTask: Task<Void, Never>?
 
-    init(root: URL) throws {
+    init(root: URL, controller: ManagementController) throws {
         storage = try PrivateFileStore(root: root)
+        self.controller = controller
         if let data = try storage.read(named: "service.json") {
             configuration = try ServiceConfiguration.decodeValidated(data)
         } else {
@@ -22,7 +25,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     }
 
     func start() throws {
-        try restoreSnapshots()
+        let restored = try loadSnapshots()
         if configuration.http.enabled {
             guard !configuration.http.allowedNetworks.isEmpty else {
                 throw ServiceConfigurationError.invalidCIDR
@@ -54,9 +57,24 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
                 await self?.runMQTT(publisher)
             }
         }
+        collectionTask = Task { [weak self] in
+            guard let self else { return }
+            for entry in restored {
+                await self.snapshots.recordSuccess(entry.snapshot, attemptedAt: entry.lastAttemptAt)
+                if let failure = entry.lastFailure {
+                    await self.snapshots.recordFailure(
+                        accountID: entry.snapshot.id,
+                        attemptedAt: entry.lastAttemptAt,
+                        reason: failure
+                    )
+                }
+            }
+            await self.runCollectionLoop()
+        }
     }
 
     func stop() async {
+        collectionTask?.cancel()
         mqttTask?.cancel()
         if let publisher = mqttPublisher {
             let planner = HomeAssistantMQTTPlanner(topicPrefix: configuration.mqtt.topicPrefix)
@@ -65,8 +83,10 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
         }
         mqttPublisher = nil
         mqttTask = nil
+        collectionTask = nil
         try? httpServer?.stop()
         httpServer = nil
+        await controller.stopAllSessions()
     }
 
     private func runMQTT(_ publisher: HomeAssistantMQTTPublisher) async {
@@ -75,34 +95,31 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
         var failures = 0
 
         while !Task.isCancelled {
-            let disconnect = AsyncStream<Void> { continuation in
-                Task { [self] in
-                    do {
-                        try await publisher.connect(
-                            onHomeAssistantBirth: { [weak self] in
-                                Task { await self?.publishHomeAssistantBirth() }
-                            },
-                            onDisconnect: {
-                                continuation.yield()
-                                continuation.finish()
-                            }
-                        )
-                        let entries = await self.snapshots.all()
-                        let publications = try planner.reconnectPublications(
-                            entries: entries,
-                            now: Date(),
-                            staleAfterSeconds: self.configuration.staleAfterSeconds
-                        )
-                        try await publisher.publish(publications)
-                        self.logger.info("MQTT sensor publication enabled.")
-                    } catch {
+            let (disconnects, continuation) = AsyncStream<Void>.makeStream()
+            do {
+                try await publisher.connect(
+                    onHomeAssistantBirth: { [weak self] in
+                        Task { await self?.publishHomeAssistantBirth() }
+                    },
+                    onDisconnect: {
+                        continuation.yield()
                         continuation.finish()
                     }
-                }
+                )
+                failures = 0
+                let entries = await snapshots.all()
+                let publications = try planner.reconnectPublications(
+                    entries: entries,
+                    now: Date(),
+                    staleAfterSeconds: configuration.staleAfterSeconds
+                )
+                try await publisher.publish(publications)
+                logger.info("MQTT sensor publication enabled.")
+                var iterator = disconnects.makeAsyncIterator()
+                _ = await iterator.next()
+            } catch {
+                continuation.finish()
             }
-
-            var iterator = disconnect.makeAsyncIterator()
-            _ = await iterator.next()
             guard !Task.isCancelled else { return }
             failures += 1
             logger.error("MQTT disconnected; retrying without logging credentials or payloads.")
@@ -128,24 +145,52 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
         }
     }
 
-    private func restoreSnapshots() throws {
-        guard let data = try storage.read(named: "snapshots.json") else { return }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        let restored = try decoder.decode([StoredSnapshot].self, from: data)
-        for entry in restored {
-            let snapshots = snapshots
-            Task {
-                await snapshots.recordSuccess(entry.snapshot, attemptedAt: entry.lastAttemptAt)
-                if let failure = entry.lastFailure {
-                    await snapshots.recordFailure(
-                        accountID: entry.snapshot.id,
-                        attemptedAt: entry.lastAttemptAt,
-                        reason: failure
+    private func runCollectionLoop() async {
+        let planner = HomeAssistantMQTTPlanner(topicPrefix: configuration.mqtt.topicPrefix)
+        while !Task.isCancelled {
+            let removed = await controller.collectAll(into: snapshots)
+            do {
+                let entries = await snapshots.all()
+                try persistSnapshots(entries)
+                if let mqttPublisher {
+                    var publications = try planner.snapshotPublications(
+                        entries: entries,
+                        now: Date(),
+                        staleAfterSeconds: configuration.staleAfterSeconds,
+                        includeDiscovery: true
                     )
+                    for snapshot in removed {
+                        publications.append(
+                            contentsOf: try planner.removalPublications(for: snapshot))
+                    }
+                    try await mqttPublisher.publish(publications)
                 }
+            } catch {
+                logger.error("Sensor state publication failed; secrets and payloads were omitted.")
+            }
+            do {
+                try await Task.sleep(
+                    for: .seconds(configuration.pollIntervalSeconds),
+                    clock: .continuous
+                )
+            } catch {
+                return
             }
         }
+    }
+
+    private func loadSnapshots() throws -> [StoredSnapshot] {
+        guard let data = try storage.read(named: "snapshots.json") else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return try decoder.decode([StoredSnapshot].self, from: data)
+    }
+
+    private func persistSnapshots(_ entries: [StoredSnapshot]) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        encoder.outputFormatting = [.sortedKeys]
+        try storage.write(try encoder.encode(entries), named: "snapshots.json")
     }
 
     private func mqttPassword() throws -> String? {

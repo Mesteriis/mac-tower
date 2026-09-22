@@ -51,7 +51,10 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         self.configuration = configuration
     }
 
-    public func start(messageHandler: @escaping MessageHandler) throws {
+    public func start(
+        messageHandler: @escaping MessageHandler,
+        terminationHandler: @escaping @Sendable () -> Void = {}
+    ) throws {
         lock.lock()
         defer { lock.unlock() }
         guard process == nil else { throw CodexAppServerProcessError.alreadyRunning }
@@ -73,6 +76,7 @@ public final class CodexAppServerProcess: @unchecked Sendable {
         }
         process.terminationHandler = { _ in
             outputPipe.fileHandleForReading.readabilityHandler = nil
+            terminationHandler()
         }
         try process.run()
         self.process = process
@@ -198,6 +202,16 @@ public enum JSONValue: Equatable, Sendable {
         case .array(let value): value.map(\.jsonObject)
         case .object(let value): value.mapValues(\.jsonObject)
         }
+    }
+
+    public var stringValue: String? {
+        guard case .string(let value) = self else { return nil }
+        return value
+    }
+
+    public subscript(key: String) -> JSONValue? {
+        guard case .object(let object) = self else { return nil }
+        return object[key]
     }
 }
 

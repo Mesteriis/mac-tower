@@ -8,6 +8,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The menu bar UI belongs to the logged-in user's GUI session.
         NSApp.setActivationPolicy(.accessory)
-        logger.info("MacTower menu bar application started; network endpoints are not implemented.")
+        logger.info("MacTower menu bar application started.")
     }
 }

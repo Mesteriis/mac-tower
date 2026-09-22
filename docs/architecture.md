@@ -2,34 +2,55 @@
 
 ## Components
 
-| Component | Context | Current responsibility |
+| Component | Context | Responsibility |
 | --- | --- | --- |
-| `MacTowerApp` | Logged-in user | SwiftUI `MenuBarExtra`, settings, and the menu bar title preference. |
-| `MacTowerCore` | Shared library | Daemon command-line parsing, testable without a UI or root. |
-| `MacTowerDaemon` | Root service | Command-line help/version, privilege check, and termination-signal lifecycle. |
+| `MacTowerApp` | Logged-in user | Menu bar UI, provider setup, reversible Claude statusline setup, network settings, and a signature-pinned XPC client. |
+| `MacTowerCore` | Shared | Public sensor model, provider parsers/clients, storage boundaries, HTTP routing, MQTT planning, management DTOs, and validation. |
+| `MacTowerTransport` | Root daemon | SwiftNIO HTTP server and MQTTNIO publisher. |
+| `MacTowerDaemon` | Root LaunchDaemon | Account registry, polling, snapshots, Codex processes, XPC service, HTTP, and MQTT. |
+| `mac-tower-claude-bridge` | Claude user's statusline | Filters Claude's stdin JSON into one account snapshot without reading credentials. |
 
-The package uses explicit source paths under `src/` and test paths under `tests/`. Helper scripts live in `src/scripts/`; application bundle resources live in `src/Resources/`.
+Sources live under `src/`, tests under `tests/`, and SwiftPM resolves exact top-level SwiftNIO and MQTTNIO versions in `Package.resolved`.
 
-The application and daemon are separate executables. There is currently no communication channel between them. The application shows scaffold status, not a live daemon connection or collected machine metrics.
+## Data flow
 
-## Process and permission boundaries
+```text
+Codex app-server (one CODEX_HOME/account) ─┐
+DeepSeek /user/balance + root-held key ────┼─> SnapshotStore ─> HTTP GET
+Claude user statusline snapshot ───────────┘                └─> MQTT + HA Discovery
 
-The menu bar application runs as the logged-in user because its UI and future window-management operations belong to that user's graphical session. Root execution is confined to the separate daemon. A daemon's root privileges do not provide access to the logged-in user's WindowServer session or satisfy Accessibility consent. See Apple's [daemon design guidance](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/DesigningDaemons.html).
+Menu bar app ── UID + app cdhash ──> finite XPC service
+Menu bar app <─ daemon cdhash ────── root LaunchDaemon
+```
 
-Daemon invocation with `--help` or `--version` is nonprivileged. Starting its service loop requires effective user ID 0. The current loop remains idle until it receives a termination signal. Building or opening the application neither installs nor starts this root process.
+Codex and DeepSeek are collected on the configured interval, with a minimum of 60 seconds and a default of five minutes. Failed collections preserve the last snapshot and record the last attempt and classified failure. A reset timestamp does not mutate or zero usage; only a new provider observation does.
 
-A future installation mechanism will need to define how the daemon starts, how it is removed, and how the user authorizes installation. `src/Resources/dev.mactower.daemon.plist` is a launchd template; it is not registered or installed by the build. No installer or privilege escalation mechanism is included in the scaffold. Apple's [Service Management documentation](https://developer.apple.com/documentation/servicemanagement) is the reference for evaluating that integration.
+Claude is event-driven. Claude Code sends statusline JSON to the wrapper, which gives the original statusline command the same stdin and sends a filtered copy to the bridge. Repeated identical quota data retains the prior observation timestamp, so a statusline redraw is not misrepresented as a new provider poll.
 
-## Future metrics and controls
+## Account isolation
 
-The product direction is to publish user-selected metrics, such as battery state or Codex usage limits, and offer narrowly defined controls to a smart-home dashboard or another local client. None of those collectors or actions is implemented yet. The data source and permission requirements for each capability must be verified independently.
+Each Codex registration maps to a validated directory below the daemon's `codex` root. The daemon invokes the pinned installed Codex binary with only that `CODEX_HOME` and a fixed system `PATH`. OAuth operations are serialized. The official client owns its credential file and refresh lifecycle; MacTower never copies a refresh token from another app.
 
-No transport protocol or IPC mechanism has been implemented. Introducing either requires a concrete contract: which process owns each operation, what data crosses the boundary, how inputs are validated, and how failures are reported. Operations that need a user session should remain in that session; only operations that need elevated privileges should reach the root daemon.
+Claude multi-account support uses explicitly chosen, separate `CLAUDE_CONFIG_DIR` values. MacTower does not scan for profiles. DeepSeek registrations map a stable account ID to a separately stored key filename.
 
-The network service is intended to omit application-level authentication. Its trust boundary must therefore be enforced through explicitly selected interfaces and accepted local peers. RFC 1918 membership alone does not prove local-network membership, and IPv6 needs an explicit policy. Supported remote actions must be finite and must not accept arbitrary shell commands. See [SECURITY.md](../SECURITY.md).
+## Privilege and IPC
 
-## Build and validation
+The app cannot access the root secret store directly. Its XPC protocol has one serialized entry point whose envelope decodes to a finite operation enum: status, configuration replacement, Codex OAuth start, Claude profile link, DeepSeek key replacement, and account removal.
 
-Swift Package Manager builds the executables and shared core. The Makefile provides the common development commands. Application packaging produces `dist/MacTower.app` with an ad-hoc development signature; this is not a notarized distribution or an installer.
+The installer applies hardened-runtime ad-hoc signing and records app/daemon cdhash values. The daemon configures its listener with the app requirement and separately checks the caller's effective UID. The client configures its connection with the daemon requirement. Updating either executable therefore requires reinstalling the trust manifest.
 
-Tests in `tests/MacTowerCoreTests/` exercise daemon command parsing without obtaining root privileges or changing the machine's permissions. Native UI and future privileged integration require separate, documented validation; passing unit tests alone does not establish that those integrations work.
+This design is appropriate for a local OSS build, not a substitute for Developer ID signing and notarization.
+
+## Network publication
+
+HTTP routing is read-only and testable independently from NIO. Only `/health`, `/v1/accounts`, and `/v1/sensors` accept `GET`; the peer address must match an explicit local IPv4 CIDR. HTTP and MQTT are disabled by default.
+
+MQTT uses retained availability and account state, Home Assistant Discovery, a last will, reconnect attempts, and a subscription to `homeassistant/status` for Discovery replay. Removing an account produces retained empty state and Discovery payloads on the next collection cycle. TLS uses MQTTNIO's client configuration with full certificate and hostname verification.
+
+Public models contain stable account ID, provider, user label, source, provider observation time, freshness, last collection attempt/failure, and only the supported quota or balance fields. Optional means unknown or unavailable; it is not encoded as zero.
+
+## Installation and lifecycle
+
+`make install` is the only install path. It stages the app, installs root-owned helper binaries and the LaunchDaemon plist, pins the selected Codex binary, records trust hashes, and bootstraps launchd. Ordinary builds make no system changes. `make uninstall` stops the service and removes installed code while preserving `/Library/Application Support/MacTower`; `make purge-data` handles destructive data removal separately.
+
+Automated tests cover parsers, missing fields, exact money strings, snapshot freshness, secret-free public JSON, local ACLs, HTTP method rejection, MQTT plans/tombstones, storage isolation, Claude bridge restoration, XPC DTO trust requirements, CLI privilege behavior, and install/uninstall/purge dry-runs. The optional Docker test verifies a retained MQTTNIO round trip through Mosquitto. Real OAuth, signing/launchd integration, logout operation, and production broker configuration remain manual acceptance checks.
