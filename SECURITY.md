@@ -34,7 +34,6 @@ Provider credentials, provider email addresses, raw responses, project paths, tr
 - IPv6 publishing is not implemented.
 - An allowlisted network is a trust grant; RFC1918 addressing alone does not make its devices trustworthy.
 - Network listener changes require a daemon restart.
-- Per-field publication selection is not implemented; all available fields for connected accounts are published when a transport is enabled.
 - Claude telemetry is last-seen statusline data, not an autonomous provider poll. It can become stale after the CLI or user session stops.
 - Unit fixtures and installer dry-runs do not replace manual testing with real accounts, an installed LaunchDaemon, logout, or a real MQTT broker.
 

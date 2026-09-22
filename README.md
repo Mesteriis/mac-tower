@@ -44,7 +44,7 @@ make check
 | `make app` / `make run` | Package or run the development menu bar app. |
 | `make release` | Build optimized binaries and the app bundle. |
 | `make install-dry-run` | Print installation actions without changing the Mac. |
-| `make install` | Build and install the app, pinned Codex copy, helper tools, and LaunchDaemon; prompts for administrator access. |
+| `make install` | Build and install the app, verified OpenAI-signed Codex copy, helper tools, and LaunchDaemon; prompts for administrator access. |
 | `make uninstall` | Remove installed code and the LaunchDaemon while preserving account data. |
 | `make purge-data` | Separately and permanently remove preserved account data after typing an exact confirmation. |
 
@@ -54,7 +54,7 @@ Development bundles are not Developer ID signed or notarized. Every local OSS in
 
 After `make install`, open MacTower Settings → Accounts.
 
-- **Codex:** choose a stable account ID and name, then start OAuth. OAuth flows are serialized. Each account has its own daemon-owned `CODEX_HOME`; the installed Codex client owns and refreshes its credentials. Existing application refresh tokens are not copied.
+- **Codex:** choose a stable account ID and name, then start OAuth. OAuth flows are serialized, can be cancelled from settings, and expire after ten minutes. Each account has its own daemon-owned `CODEX_HOME`; the installed Codex client owns and refreshes its credentials. Existing application refresh tokens are not copied. Removing the account deletes that isolated credential directory.
 - **Claude:** supply the profile's explicit `CLAUDE_CONFIG_DIR` and snapshot path ending in `<account-id>.json`. The app installs a reversible wrapper around that profile's current `statusLine`. Multiple accounts require separate Claude config directories. Values update only when that Claude CLI profile runs its statusline.
 - **DeepSeek:** enter the API key. Replacing the key is an explicit repeat of this action; no automatic API-key rotation exists.
 
@@ -62,7 +62,7 @@ The app never silently scans the disk for profiles.
 
 ## Publish to the LAN
 
-Publishing is off by default. Settings → Publishing writes daemon configuration through authenticated XPC. Listener changes take effect after the daemon restarts.
+Publishing is off by default. Settings → Publishing selects either every connected account or an explicit account set, plus individual quota/balance fields. The same selection applies to HTTP and MQTT. Configuration is written through authenticated XPC; listener changes take effect after the daemon restarts.
 
 HTTP exposes only:
 
@@ -72,7 +72,7 @@ HTTP exposes only:
 
 Other methods and unknown routes are rejected. HTTP is IPv4-only and requires an explicit RFC1918, loopback, or link-local allowlist containing the selected bind address.
 
-MQTT supports broker username/password, certificate-verified TLS, retained account state, availability, Home Assistant Discovery, reconnects, HA birth republishing, and retained tombstones when an account disappears. The current release publishes all available fields for every connected account; per-field selection UI is not implemented yet.
+MQTT accepts a private IPv4 address, `localhost`, a single-label LAN hostname, or a `.local` hostname. It supports broker username/password, certificate-verified TLS, retained account state, availability, Home Assistant Discovery, reconnects, HA birth republishing, and durable retained-topic reconciliation. Removed accounts and deselected fields are tombstoned after the broker reconnects; the advertised-topic ledger advances only after successful publication.
 
 ## Runtime and data
 

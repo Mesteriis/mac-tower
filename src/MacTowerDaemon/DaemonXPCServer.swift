@@ -77,6 +77,11 @@ private final class ManagementXPCService: NSObject, MacTowerDaemonXPCProtocol, @
                 try decoder.decode(
                     StartCodexOAuthRequest.self, from: requiredPayload(envelope)))
             return try encoder.encode(response)
+        case .cancelCodexOAuth:
+            await controller.cancelCodexOAuth(
+                try decoder.decode(
+                    CancelCodexOAuthRequest.self, from: requiredPayload(envelope)))
+            return Data("{}".utf8)
         case .linkClaudeProfile:
             try await controller.linkClaude(
                 try decoder.decode(

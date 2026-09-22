@@ -4,6 +4,7 @@ import MacTowerCore
 enum CodexAccountSessionError: Error {
     case rpc(Int)
     case invalidResponse
+    case timeout
 }
 
 actor CodexAccountSession {
@@ -14,20 +15,28 @@ actor CodexAccountSession {
     private let process: CodexAppServerProcess
     private let factory = CodexAppServerRequestFactory()
     private let notificationHandler: NotificationHandler
+    private let terminationHandler: @Sendable () -> Void
     private var started = false
     private var nextID = 1
-    private var pending: [Int: CheckedContinuation<CodexAppServerMessage, Error>] = [:]
+    private struct PendingRequest {
+        let continuation: CheckedContinuation<CodexAppServerMessage, Error>
+        let timeoutTask: Task<Void, Never>
+    }
+
+    private var pending: [Int: PendingRequest] = [:]
 
     init(
         accountID: AccountID,
         label: String,
         configuration: CodexAppServerProcessConfiguration,
-        notificationHandler: @escaping NotificationHandler
+        notificationHandler: @escaping NotificationHandler,
+        terminationHandler: @escaping @Sendable () -> Void
     ) {
         self.accountID = accountID
         self.label = label
         process = CodexAppServerProcess(configuration: configuration)
         self.notificationHandler = notificationHandler
+        self.terminationHandler = terminationHandler
     }
 
     func startLogin() async throws -> CodexOAuthStart {
@@ -57,10 +66,11 @@ actor CodexAccountSession {
     func stop() {
         process.stop()
         started = false
-        let continuations = pending.values
+        let requests = pending.values
         pending.removeAll()
-        for continuation in continuations {
-            continuation.resume(throwing: CodexAppServerProcessError.notRunning)
+        for request in requests {
+            request.timeoutTask.cancel()
+            request.continuation.resume(throwing: CodexAppServerProcessError.notRunning)
         }
     }
 
@@ -86,11 +96,22 @@ actor CodexAccountSession {
         nextID += 1
         let frame = try makeFrame(id)
         return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
+            let timeoutTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(30), clock: .continuous)
+                } catch {
+                    return
+                }
+                await self?.timeOutRequest(id: id)
+            }
+            pending[id] = PendingRequest(
+                continuation: continuation,
+                timeoutTask: timeoutTask
+            )
             do {
                 try process.send(frame)
             } catch {
-                pending.removeValue(forKey: id)
+                pending.removeValue(forKey: id)?.timeoutTask.cancel()
                 process.stop()
                 started = false
                 continuation.resume(throwing: error)
@@ -100,11 +121,12 @@ actor CodexAccountSession {
 
     private func receive(_ data: Data) {
         guard let message = try? CodexAppServerMessageParser().parse(data) else { return }
-        if let id = message.id, let continuation = pending.removeValue(forKey: id) {
+        if let id = message.id, let request = pending.removeValue(forKey: id) {
+            request.timeoutTask.cancel()
             if let error = message.error {
-                continuation.resume(throwing: CodexAccountSessionError.rpc(error.code))
+                request.continuation.resume(throwing: CodexAccountSessionError.rpc(error.code))
             } else {
-                continuation.resume(returning: message)
+                request.continuation.resume(returning: message)
             }
         } else if message.method != nil {
             notificationHandler(message)
@@ -113,10 +135,19 @@ actor CodexAccountSession {
 
     private func processTerminated() {
         started = false
-        let continuations = pending.values
+        let requests = pending.values
         pending.removeAll()
-        for continuation in continuations {
-            continuation.resume(throwing: CodexAppServerProcessError.notRunning)
+        for request in requests {
+            request.timeoutTask.cancel()
+            request.continuation.resume(throwing: CodexAppServerProcessError.notRunning)
         }
+        terminationHandler()
+    }
+
+    private func timeOutRequest(id: Int) {
+        guard let request = pending.removeValue(forKey: id) else { return }
+        process.stop()
+        started = false
+        request.continuation.resume(throwing: CodexAccountSessionError.timeout)
     }
 }

@@ -4,6 +4,14 @@ import Foundation
 public enum ClaudeStatuslineInstallerError: Error, Equatable {
     case invalidSettings
     case invalidBridge
+    case statuslineChanged
+}
+
+public struct ClaudeStatuslineInstallationState: Sendable {
+    fileprivate let settings: Data?
+    fileprivate let backup: Data?
+    fileprivate let wrapper: Data?
+    fileprivate let originalCommand: Data?
 }
 
 public struct ClaudeStatuslineInstaller: Sendable {
@@ -13,6 +21,39 @@ public struct ClaudeStatuslineInstaller: Sendable {
     private let originalCommandName = "mactower-statusline-original.command"
 
     public init() {}
+
+    public func captureState(configDirectory: URL) throws -> ClaudeStatuslineInstallationState {
+        let storage = try PrivateFileStore(root: configDirectory)
+        return ClaudeStatuslineInstallationState(
+            settings: try storage.read(named: settingsName),
+            backup: try storage.read(named: backupName),
+            wrapper: try storage.read(named: wrapperName),
+            originalCommand: try storage.read(named: originalCommandName)
+        )
+    }
+
+    public func restore(
+        _ state: ClaudeStatuslineInstallationState,
+        configDirectory: URL
+    ) throws {
+        let storage = try PrivateFileStore(root: configDirectory)
+        let settings = try loadSettings(from: storage)
+        let wrapperPath = storage.root.appending(path: wrapperName).path
+        guard
+            (settings["statusLine"] as? [String: Any])?["command"] as? String == wrapperPath
+        else {
+            throw ClaudeStatuslineInstallerError.statuslineChanged
+        }
+        try restore(state.backup, named: backupName, in: storage)
+        try restore(state.wrapper, named: wrapperName, in: storage)
+        if state.wrapper != nil {
+            guard chmod(storage.root.appending(path: wrapperName).path, 0o700) == 0 else {
+                throw PrivateFileStoreError.ioFailure
+            }
+        }
+        try restore(state.originalCommand, named: originalCommandName, in: storage)
+        try restore(state.settings, named: settingsName, in: storage)
+    }
 
     @discardableResult
     public func install(
@@ -34,6 +75,15 @@ public struct ClaudeStatuslineInstaller: Sendable {
         let storage = try PrivateFileStore(root: configDirectory)
         var settings = try loadSettings(from: storage)
         let hasBackup = try storage.read(named: backupName) != nil
+        let wrapperURL = storage.root.appending(path: wrapperName)
+        if hasBackup {
+            guard
+                (settings["statusLine"] as? [String: Any])?["command"] as? String
+                    == wrapperURL.path
+            else {
+                throw ClaudeStatuslineInstallerError.statuslineChanged
+            }
+        }
         if !hasBackup {
             let backup: [String: Any] = [
                 "hadStatusLine": settings["statusLine"] != nil,
@@ -51,7 +101,6 @@ public struct ClaudeStatuslineInstaller: Sendable {
 
         let existing = settings["statusLine"] as? [String: Any]
 
-        let wrapperURL = storage.root.appending(path: wrapperName)
         let originalCommandURL = storage.root.appending(path: originalCommandName)
         let wrapper = wrapperScript(
             bridgeURL: bridgeURL,
@@ -83,6 +132,12 @@ public struct ClaudeStatuslineInstaller: Sendable {
         }
 
         var settings = try loadSettings(from: storage)
+        let wrapperPath = storage.root.appending(path: wrapperName).path
+        guard
+            (settings["statusLine"] as? [String: Any])?["command"] as? String == wrapperPath
+        else {
+            throw ClaudeStatuslineInstallerError.statuslineChanged
+        }
         if hadStatusLine, let original = backup["statusLine"], !(original is NSNull) {
             settings["statusLine"] = original
         } else {
@@ -113,6 +168,14 @@ public struct ClaudeStatuslineInstaller: Sendable {
                 withJSONObject: settings, options: [.prettyPrinted, .sortedKeys]),
             named: settingsName
         )
+    }
+
+    private func restore(_ data: Data?, named name: String, in storage: PrivateFileStore) throws {
+        if let data {
+            try storage.write(data, named: name)
+        } else {
+            try storage.remove(named: name)
+        }
     }
 
     private func wrapperScript(

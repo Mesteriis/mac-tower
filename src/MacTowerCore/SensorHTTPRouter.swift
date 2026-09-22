@@ -35,11 +35,16 @@ public struct PublicSensorAccount: Codable, Equatable, Sendable {
     public let freshness: SensorFreshness
     public let lastAttemptAt: Date
     public let lastFailure: CollectionFailure?
-    public let quotas: [QuotaWindow]
+    public let quotas: [PublishedQuotaWindow]
     public let resetCredits: RateLimitResetCredits?
-    public let balances: [MoneyBalance]
+    public let balances: [PublishedMoneyBalance]
 
-    public init(entry: StoredSnapshot, now: Date, staleAfterSeconds: Int) {
+    public init(
+        entry: StoredSnapshot,
+        now: Date,
+        staleAfterSeconds: Int,
+        selection: PublicationSelection = .all
+    ) {
         let snapshot = entry.snapshot
         id = snapshot.id
         provider = snapshot.provider
@@ -51,9 +56,55 @@ public struct PublicSensorAccount: Codable, Equatable, Sendable {
         freshness = snapshot.freshness(at: now, staleAfter: TimeInterval(staleAfterSeconds))
         lastAttemptAt = entry.lastAttemptAt
         lastFailure = entry.lastFailure
-        quotas = snapshot.quotas
-        resetCredits = snapshot.resetCredits
-        balances = snapshot.balances
+        let publishesQuota =
+            selection.includes(.quotaUsed)
+            || selection.includes(.quotaRemaining)
+            || selection.includes(.quotaWindowDuration)
+            || selection.includes(.quotaResetsAt)
+        quotas =
+            publishesQuota
+            ? snapshot.quotas.map { PublishedQuotaWindow($0, selection: selection) } : []
+        resetCredits = selection.includes(.resetCredits) ? snapshot.resetCredits : nil
+        let publishesBalance =
+            selection.includes(.balanceTotal)
+            || selection.includes(.balanceGranted) || selection.includes(.balanceToppedUp)
+        balances =
+            publishesBalance
+            ? snapshot.balances.map { PublishedMoneyBalance($0, selection: selection) } : []
+    }
+}
+
+public struct PublishedQuotaWindow: Codable, Equatable, Sendable {
+    public let id: String
+    public let name: String?
+    public let usedPercent: Double?
+    public let remainingPercent: Double?
+    public let windowDurationMinutes: Int?
+    public let resetsAt: Date?
+
+    init(_ quota: QuotaWindow, selection: PublicationSelection) {
+        id = quota.id
+        name = quota.name
+        usedPercent = selection.includes(.quotaUsed) ? quota.usedPercent : nil
+        remainingPercent = selection.includes(.quotaRemaining) ? quota.remainingPercent : nil
+        windowDurationMinutes =
+            selection.includes(.quotaWindowDuration)
+            ? quota.windowDurationMinutes : nil
+        resetsAt = selection.includes(.quotaResetsAt) ? quota.resetsAt : nil
+    }
+}
+
+public struct PublishedMoneyBalance: Codable, Equatable, Sendable {
+    public let currency: String
+    public let total: DecimalString?
+    public let granted: DecimalString?
+    public let toppedUp: DecimalString?
+
+    init(_ balance: MoneyBalance, selection: PublicationSelection) {
+        currency = balance.currency
+        total = selection.includes(.balanceTotal) ? balance.total : nil
+        granted = selection.includes(.balanceGranted) ? balance.granted : nil
+        toppedUp = selection.includes(.balanceToppedUp) ? balance.toppedUp : nil
     }
 }
 
@@ -61,15 +112,18 @@ public struct SensorHTTPRouter: Sendable {
     private let store: SnapshotStore
     private let allowedNetworks: [IPv4CIDR]
     private let staleAfterSeconds: Int
+    private let selection: PublicationSelection
 
     public init(
         store: SnapshotStore,
         allowedNetworks: [IPv4CIDR],
-        staleAfterSeconds: Int
+        staleAfterSeconds: Int,
+        selection: PublicationSelection = .all
     ) {
         self.store = store
         self.allowedNetworks = allowedNetworks
         self.staleAfterSeconds = staleAfterSeconds
+        self.selection = selection
     }
 
     public func handle(_ request: SensorHTTPRequest, now: Date = Date()) async -> SensorHTTPResponse
@@ -88,7 +142,9 @@ public struct SensorHTTPRouter: Sendable {
             case "/health":
                 return try json(status: 200, value: HealthResponse(status: "ok"))
             case "/v1/accounts":
-                let entries = await store.all()
+                let entries = await store.all().filter {
+                    selection.includes(accountID: $0.snapshot.id)
+                }
                 let accounts = entries.map {
                     AccountSummary(
                         id: $0.snapshot.id,
@@ -101,8 +157,15 @@ public struct SensorHTTPRouter: Sendable {
                 }
                 return try json(status: 200, value: AccountsResponse(accounts: accounts))
             case "/v1/sensors":
-                let accounts = await store.all().map {
-                    PublicSensorAccount(entry: $0, now: now, staleAfterSeconds: staleAfterSeconds)
+                let accounts = await store.all().filter {
+                    selection.includes(accountID: $0.snapshot.id)
+                }.map {
+                    PublicSensorAccount(
+                        entry: $0,
+                        now: now,
+                        staleAfterSeconds: staleAfterSeconds,
+                        selection: selection
+                    )
                 }
                 return try json(
                     status: 200,

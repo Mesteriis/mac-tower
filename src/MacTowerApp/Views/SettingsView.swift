@@ -80,6 +80,17 @@ private struct AccountsSettingsView: View {
                     }
                 }
                 .disabled(daemon.isBusy)
+                if let activeID = daemon.status?.activeCodexOAuthAccountID {
+                    HStack {
+                        Text("OAuth waiting for \(activeID.rawValue)")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Cancel OAuth", role: .destructive) {
+                            Task { await daemon.cancelCodexOAuth(id: activeID) }
+                        }
+                        .disabled(daemon.isBusy)
+                    }
+                }
                 Text(
                     "Each account uses an isolated CODEX_HOME and the installed, pinned Codex app-server binary."
                 )
@@ -193,6 +204,43 @@ private struct NetworkSettingsView: View {
             Section("Collection") {
                 TextField("Poll interval, seconds (minimum 60)", text: $form.pollInterval)
             }
+            Section("Published sensors") {
+                Toggle("All connected accounts", isOn: $form.publishAllAccounts)
+                if !form.publishAllAccounts {
+                    ForEach(daemon.status?.accounts ?? [], id: \.id) { account in
+                        Toggle(
+                            account.label,
+                            isOn: Binding(
+                                get: { form.selectedAccountIDs.contains(account.id.rawValue) },
+                                set: { selected in
+                                    if selected {
+                                        form.selectedAccountIDs.insert(account.id.rawValue)
+                                    } else {
+                                        form.selectedAccountIDs.remove(account.id.rawValue)
+                                    }
+                                }
+                            )
+                        )
+                    }
+                }
+                ForEach(PublishedSensorField.allCases, id: \.self) { field in
+                    Toggle(
+                        field.displayName,
+                        isOn: Binding(
+                            get: { form.selectedFields.contains(field) },
+                            set: { selected in
+                                if selected {
+                                    form.selectedFields.insert(field)
+                                } else {
+                                    form.selectedFields.remove(field)
+                                }
+                            }
+                        )
+                    )
+                }
+                Text("The same account and field selection is applied to HTTP and MQTT.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("HTTP · read only") {
                 Toggle("Enable HTTP", isOn: $form.httpEnabled)
                 TextField("Bind IPv4 address", text: $form.httpAddress)
@@ -254,7 +302,12 @@ private struct NetworkSettingsView: View {
             let configuration = try ServiceConfiguration(
                 pollIntervalSeconds: interval,
                 http: http,
-                mqtt: mqtt
+                mqtt: mqtt,
+                publication: try PublicationSelection(
+                    accountIDs: form.publishAllAccounts
+                        ? nil : Set(form.selectedAccountIDs.map { AccountID($0) }),
+                    fields: form.selectedFields
+                )
             )
             let password: String? =
                 form.clearMQTTPassword
@@ -283,6 +336,9 @@ private final class NetworkFormModel: ObservableObject {
     @Published var mqttPassword = ""
     @Published var clearMQTTPassword = false
     @Published var mqttTopic = "mac_tower"
+    @Published var publishAllAccounts = true
+    @Published var selectedAccountIDs: Set<String> = []
+    @Published var selectedFields = Set(PublishedSensorField.allCases)
 
     func apply(_ configuration: ServiceConfiguration) {
         pollInterval = String(configuration.pollIntervalSeconds)
@@ -296,5 +352,23 @@ private final class NetworkFormModel: ObservableObject {
         mqttTLS = configuration.mqtt.useTLS
         mqttUsername = configuration.mqtt.username ?? ""
         mqttTopic = configuration.mqtt.topicPrefix
+        publishAllAccounts = configuration.publication.accountIDs == nil
+        selectedAccountIDs = Set(configuration.publication.accountIDs?.map(\.rawValue) ?? [])
+        selectedFields = configuration.publication.fields
+    }
+}
+
+extension PublishedSensorField {
+    fileprivate var displayName: String {
+        switch self {
+        case .quotaUsed: "Quota used"
+        case .quotaRemaining: "Quota remaining"
+        case .quotaWindowDuration: "Quota window duration"
+        case .quotaResetsAt: "Quota reset time"
+        case .resetCredits: "Reset credits"
+        case .balanceTotal: "Total balance"
+        case .balanceGranted: "Granted balance"
+        case .balanceToppedUp: "Topped-up balance"
+        }
     }
 }

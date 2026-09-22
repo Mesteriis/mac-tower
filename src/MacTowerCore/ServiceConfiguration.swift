@@ -9,6 +9,51 @@ public enum ServiceConfigurationError: Error, Equatable {
     case invalidPort
     case invalidHost
     case invalidTopic
+    case invalidPublicationSelection
+}
+
+public enum PublishedSensorField: String, CaseIterable, Codable, Hashable, Sendable {
+    case quotaUsed = "quota_used"
+    case quotaRemaining = "quota_remaining"
+    case quotaWindowDuration = "quota_window_duration"
+    case quotaResetsAt = "quota_resets_at"
+    case resetCredits = "reset_credits"
+    case balanceTotal = "balance_total"
+    case balanceGranted = "balance_granted"
+    case balanceToppedUp = "balance_topped_up"
+}
+
+public struct PublicationSelection: Codable, Equatable, Sendable {
+    /// `nil` publishes every connected account, including accounts added later.
+    public var accountIDs: Set<AccountID>?
+    public var fields: Set<PublishedSensorField>
+
+    public init(
+        accountIDs: Set<AccountID>? = nil,
+        fields: Set<PublishedSensorField> = Set(PublishedSensorField.allCases)
+    ) throws {
+        if let accountIDs {
+            for id in accountIDs {
+                guard id.rawValue.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._-]{0,63}/) != nil
+                else { throw ServiceConfigurationError.invalidPublicationSelection }
+            }
+        }
+        self.accountIDs = accountIDs
+        self.fields = fields
+    }
+
+    public func includes(accountID: AccountID) -> Bool {
+        accountIDs?.contains(accountID) ?? true
+    }
+
+    public func includes(_ field: PublishedSensorField) -> Bool {
+        fields.contains(field)
+    }
+
+    public static var all: PublicationSelection {
+        // Construction cannot fail for the built-in field set.
+        try! PublicationSelection()
+    }
 }
 
 public struct HTTPServiceConfiguration: Codable, Equatable, Sendable {
@@ -53,6 +98,9 @@ public struct MQTTServiceConfiguration: Codable, Equatable, Sendable {
         guard host.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9.-]{0,252}/) != nil else {
             throw ServiceConfigurationError.invalidHost
         }
+        guard !enabled || Self.isLocalBroker(host) else {
+            throw ServiceConfigurationError.invalidHost
+        }
         guard topicPrefix.wholeMatch(of: /[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}/) != nil,
             !topicPrefix.contains("//")
         else {
@@ -66,6 +114,17 @@ public struct MQTTServiceConfiguration: Codable, Equatable, Sendable {
         self.passwordSecretName = passwordSecretName
         self.topicPrefix = topicPrefix
     }
+
+    private static func isLocalBroker(_ host: String) -> Bool {
+        let normalized = host.lowercased()
+        if normalized == "localhost" || normalized.hasSuffix(".local")
+            || !normalized.contains(".")
+        {
+            return true
+        }
+        guard let address = IPv4CIDR.parseHostAddress(normalized) else { return false }
+        return IPv4CIDR.localAddressRanges.contains { address >= $0.start && address <= $0.end }
+    }
 }
 
 public struct ServiceConfiguration: Codable, Equatable, Sendable {
@@ -73,12 +132,14 @@ public struct ServiceConfiguration: Codable, Equatable, Sendable {
     public var staleAfterSeconds: Int
     public var http: HTTPServiceConfiguration
     public var mqtt: MQTTServiceConfiguration
+    public var publication: PublicationSelection
 
     public init(
         pollIntervalSeconds: Int = 300,
         staleAfterSeconds: Int? = nil,
         http: HTTPServiceConfiguration? = nil,
-        mqtt: MQTTServiceConfiguration? = nil
+        mqtt: MQTTServiceConfiguration? = nil,
+        publication: PublicationSelection = .all
     ) throws {
         guard (60...86_400).contains(pollIntervalSeconds) else {
             throw ServiceConfigurationError.invalidPollInterval
@@ -93,6 +154,10 @@ public struct ServiceConfiguration: Codable, Equatable, Sendable {
         self.staleAfterSeconds = resolvedStaleAfter
         self.http = try http ?? HTTPServiceConfiguration()
         self.mqtt = try mqtt ?? MQTTServiceConfiguration()
+        self.publication = try PublicationSelection(
+            accountIDs: publication.accountIDs,
+            fields: publication.fields
+        )
     }
 
     public static func decodeValidated(_ data: Data) throws -> ServiceConfiguration {
@@ -119,7 +184,8 @@ public struct ServiceConfiguration: Codable, Equatable, Sendable {
                 username: decoded.mqtt.username,
                 passwordSecretName: decoded.mqtt.passwordSecretName,
                 topicPrefix: decoded.mqtt.topicPrefix
-            )
+            ),
+            publication: decoded.publication ?? .all
         ).validateForActivation()
     }
 
@@ -159,6 +225,22 @@ private struct PersistedServiceConfiguration: Decodable {
     let staleAfterSeconds: Int
     let http: HTTP
     let mqtt: MQTT
+    let publication: PublicationSelection?
+}
+
+extension ServiceConfiguration {
+    public func applyingMQTTSecretPolicy(
+        existingSecretName: String?,
+        replacementPassword: String?
+    ) -> ServiceConfiguration {
+        var result = self
+        if let replacementPassword {
+            result.mqtt.passwordSecretName = replacementPassword.isEmpty ? nil : "mqtt-password"
+        } else {
+            result.mqtt.passwordSecretName = existingSecretName
+        }
+        return result
+    }
 }
 
 public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
@@ -191,7 +273,7 @@ public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
 
     public var isLocalNetwork: Bool {
         let end = network | ~Self.mask(prefixLength: prefixLength)
-        return Self.localBlocks.contains { block in
+        return Self.localAddressRanges.contains { block in
             network >= block.start && end <= block.end
         }
     }
@@ -205,10 +287,14 @@ public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
         try container.encode(description)
     }
 
-    private static func parseAddress(_ value: String) -> UInt32? {
+    fileprivate static func parseHostAddress(_ value: String) -> UInt32? {
         var address = in_addr()
         guard inet_pton(AF_INET, value, &address) == 1 else { return nil }
         return UInt32(bigEndian: address.s_addr)
+    }
+
+    private static func parseAddress(_ value: String) -> UInt32? {
+        parseHostAddress(value)
     }
 
     private static func mask(prefixLength: UInt8) -> UInt32 {
@@ -216,7 +302,7 @@ public struct IPv4CIDR: Codable, Equatable, Hashable, Sendable {
         return UInt32.max << (32 - UInt32(prefixLength))
     }
 
-    private static let localBlocks: [(start: UInt32, end: UInt32)] = [
+    fileprivate static let localAddressRanges: [(start: UInt32, end: UInt32)] = [
         (0x0A00_0000, 0x0AFF_FFFF),
         (0xAC10_0000, 0xAC1F_FFFF),
         (0xC0A8_0000, 0xC0A8_FFFF),
@@ -237,6 +323,23 @@ public struct ManagedAccountPaths: Sendable {
             throw ServiceConfigurationError.invalidAccountID
         }
         return root.appending(path: id.rawValue, directoryHint: .isDirectory)
+    }
+
+    public func removeDirectory(for id: AccountID) throws {
+        let directory = try directory(for: id)
+        var metadata = stat()
+        if lstat(directory.path, &metadata) != 0 {
+            if errno == ENOENT { return }
+            throw PrivateFileStoreError.ioFailure
+        }
+        guard metadata.st_mode & S_IFMT == S_IFDIR else {
+            throw PrivateFileStoreError.ioFailure
+        }
+        do {
+            try FileManager.default.removeItem(at: directory)
+        } catch {
+            throw PrivateFileStoreError.ioFailure
+        }
     }
 }
 

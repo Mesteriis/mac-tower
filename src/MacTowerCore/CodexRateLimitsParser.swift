@@ -28,12 +28,13 @@ public struct CodexRateLimitsParser: Sendable {
         var quotas: [QuotaWindow] = []
         for (key, bucket) in buckets {
             if let primary = bucket.primary {
-                quotas.append(primary.quota(id: "\(key).primary", name: bucket.limitName))
+                quotas.append(try primary.quota(id: "\(key).primary", name: bucket.limitName))
             }
             if let secondary = bucket.secondary {
-                quotas.append(secondary.quota(id: "\(key).secondary", name: bucket.limitName))
+                quotas.append(try secondary.quota(id: "\(key).secondary", name: bucket.limitName))
             }
         }
+        guard !quotas.isEmpty else { throw SensorParsingError.invalidPayload }
 
         let credits = response.rateLimitResetCredits.map { value in
             RateLimitResetCredits(
@@ -86,8 +87,14 @@ extension CodexRateLimitsParser {
         let windowDurationMins: Int
         let resetsAt: TimeInterval
 
-        func quota(id: String, name: String?) -> QuotaWindow {
-            QuotaWindow(
+        func quota(id: String, name: String?) throws -> QuotaWindow {
+            guard usedPercent.isFinite, (0...100).contains(usedPercent),
+                windowDurationMins > 0, windowDurationMins <= 525_600,
+                resetsAt.isFinite, resetsAt > 0
+            else {
+                throw SensorParsingError.invalidPayload
+            }
+            return QuotaWindow(
                 id: id,
                 name: name,
                 usedPercent: usedPercent,

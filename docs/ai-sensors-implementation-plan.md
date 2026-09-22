@@ -29,31 +29,31 @@
 
 **Produces:** `AccountSnapshot`, quota/balance value types, freshness evaluation, Codex/Claude/DeepSeek parsers, public JSON encoding.
 
-- [ ] Add failing fixture-based tests for multi-window Codex quotas, Claude filtered statusline data, exact DeepSeek decimals, missing values, and secret-free encoding.
-- [ ] Implement the minimum model and parsers; run the focused tests and full suite.
-- [ ] Commit the green slice.
+- [x] Add failing fixture-based tests for multi-window Codex quotas, Claude filtered statusline data, exact DeepSeek decimals, missing values, and secret-free encoding.
+- [x] Implement the minimum model and parsers; run the focused tests and full suite.
+- [x] Commit the green slice.
 
 ### Task 2: Configuration, collectors, and persistence
 
 **Consumes:** Task 1 snapshot types. **Produces:** validated service configuration, safe root storage, poll scheduler, Codex App Server process client, DeepSeek client, Claude bridge ingestion.
 
-- [ ] Add failing tests for interval/CIDR/path validation, atomic snapshot retention, stale-on-error behavior, JSON-RPC framing, and bridge filtering.
-- [ ] Implement collectors and the standalone Claude bridge without reading real credentials in tests.
-- [ ] Commit the green slice.
+- [x] Add failing tests for interval/CIDR/path validation, atomic snapshot retention, stale-on-error behavior, JSON-RPC framing, and bridge filtering.
+- [x] Implement collectors and the standalone Claude bridge without reading real credentials in tests.
+- [x] Commit the green slice.
 
 ### Task 3: Read-only HTTP and MQTT publication
 
 **Consumes:** snapshot store/configuration. **Produces:** HTTP routes and NIO server, MQTT discovery/state message planner and MQTTNIO publisher.
 
-- [ ] Add failing tests for routes, peer ACL, non-GET rejection, absent-vs-zero JSON, HA discovery, reconnect/birth republish, and removal tombstones.
-- [ ] Add pinned compatible dependencies and implement the transports disabled by default.
-- [ ] Commit the green slice.
+- [x] Add failing tests for routes, peer ACL, non-GET rejection, absent-vs-zero JSON, HA discovery, reconnect/birth republish, and removal tombstones.
+- [x] Add pinned compatible dependencies and implement the transports disabled by default.
+- [x] Commit the green slice.
 
 ### Task 4: Privileged lifecycle, XPC, settings, and documentation
 
 **Consumes:** daemon configuration/accounts. **Produces:** typed management API, launchd service packaging/install/uninstall, provider settings UI, service status, docs.
 
-- [ ] Add failing tests for finite management operations, account validation, installer dry-run behavior, and CLI lifecycle.
-- [ ] Implement XPC trust checks, hardened ad-hoc packaging, explicit administrator scripts/Make targets, and SwiftUI settings including Cursor “Soon”.
-- [ ] Update README, architecture, and security documentation; run `make check` plus packaging/install dry-run checks.
-- [ ] Commit the green slice and complete whole-branch review.
+- [x] Add failing tests for finite management operations, account validation, installer dry-run behavior, and CLI lifecycle.
+- [x] Implement XPC trust checks, hardened ad-hoc packaging, explicit administrator scripts/Make targets, and SwiftUI settings including Cursor “Soon”.
+- [x] Update README, architecture, and security documentation; run `make check` plus packaging/install dry-run checks.
+- [x] Commit the green slice and complete whole-branch review.

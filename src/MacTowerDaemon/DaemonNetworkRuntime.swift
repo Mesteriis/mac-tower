@@ -8,6 +8,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     private let storage: PrivateFileStore
     private let controller: ManagementController
     private let configuration: ServiceConfiguration
+    private let mqttLedger: MQTTAdvertisementLedger
     private let snapshots = SnapshotStore()
     private var httpServer: SensorHTTPServer?
     private var mqttPublisher: HomeAssistantMQTTPublisher?
@@ -16,6 +17,7 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
 
     init(root: URL, controller: ManagementController) throws {
         storage = try PrivateFileStore(root: root)
+        mqttLedger = try MQTTAdvertisementLedger(storage: storage)
         self.controller = controller
         if let data = try storage.read(named: "service.json") {
             configuration = try ServiceConfiguration.decodeValidated(data)
@@ -33,7 +35,8 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
             let router = SensorHTTPRouter(
                 store: snapshots,
                 allowedNetworks: configuration.http.allowedNetworks,
-                staleAfterSeconds: configuration.staleAfterSeconds
+                staleAfterSeconds: configuration.staleAfterSeconds,
+                selection: configuration.publication
             )
             let server = SensorHTTPServer(
                 router: router,
@@ -111,9 +114,15 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
                 let publications = try planner.reconnectPublications(
                     entries: entries,
                     now: Date(),
-                    staleAfterSeconds: configuration.staleAfterSeconds
+                    staleAfterSeconds: configuration.staleAfterSeconds,
+                    selection: configuration.publication
                 )
-                try await publisher.publish(publications)
+                try await publishReconciled(
+                    publications,
+                    entries: entries,
+                    planner: planner,
+                    publisher: publisher
+                )
                 logger.info("MQTT sensor publication enabled.")
                 var iterator = disconnects.makeAsyncIterator()
                 _ = await iterator.next()
@@ -137,7 +146,8 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
             ).homeAssistantBirthPublications(
                 entries: entries,
                 now: Date(),
-                staleAfterSeconds: configuration.staleAfterSeconds
+                staleAfterSeconds: configuration.staleAfterSeconds,
+                selection: configuration.publication
             )
             try await mqttPublisher.publish(publications)
         } catch {
@@ -148,22 +158,24 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
     private func runCollectionLoop() async {
         let planner = HomeAssistantMQTTPlanner(topicPrefix: configuration.mqtt.topicPrefix)
         while !Task.isCancelled {
-            let removed = await controller.collectAll(into: snapshots)
+            _ = await controller.collectAll(into: snapshots)
             do {
                 let entries = await snapshots.all()
                 try persistSnapshots(entries)
                 if let mqttPublisher {
-                    var publications = try planner.snapshotPublications(
+                    let publications = try planner.snapshotPublications(
                         entries: entries,
                         now: Date(),
                         staleAfterSeconds: configuration.staleAfterSeconds,
-                        includeDiscovery: true
+                        includeDiscovery: true,
+                        selection: configuration.publication
                     )
-                    for snapshot in removed {
-                        publications.append(
-                            contentsOf: try planner.removalPublications(for: snapshot))
-                    }
-                    try await mqttPublisher.publish(publications)
+                    try await publishReconciled(
+                        publications,
+                        entries: entries,
+                        planner: planner,
+                        publisher: mqttPublisher
+                    )
                 }
             } catch {
                 logger.error("Sensor state publication failed; secrets and payloads were omitted.")
@@ -198,5 +210,23 @@ final class DaemonNetworkRuntime: @unchecked Sendable {
             let data = try storage.read(named: name)
         else { return nil }
         return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func publishReconciled(
+        _ currentPublications: [MQTTPublication],
+        entries: [StoredSnapshot],
+        planner: HomeAssistantMQTTPlanner,
+        publisher: HomeAssistantMQTTPublisher
+    ) async throws {
+        let currentTopics = planner.advertisedTopics(
+            entries: entries,
+            selection: configuration.publication
+        )
+        let stale = await mqttLedger.stalePublications(
+            planner: planner,
+            currentTopics: currentTopics
+        )
+        try await publisher.publish(currentPublications + stale)
+        try await mqttLedger.commit(currentTopics)
     }
 }

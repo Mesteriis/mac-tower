@@ -27,18 +27,24 @@ public struct HomeAssistantMQTTPlanner: Sendable {
         entries: [StoredSnapshot],
         now: Date,
         staleAfterSeconds: Int,
-        includeDiscovery: Bool
+        includeDiscovery: Bool,
+        selection: PublicationSelection = .all
     ) throws -> [MQTTPublication] {
         var publications = [availabilityPublication(online: true)]
-        for entry in entries {
+        for entry in entries where selection.includes(accountID: entry.snapshot.id) {
             if includeDiscovery {
-                publications.append(contentsOf: try discoveryPublications(for: entry.snapshot))
+                publications.append(
+                    contentsOf: try discoveryPublications(
+                        for: entry.snapshot,
+                        selection: selection
+                    ))
             }
             publications.append(
                 try statePublication(
                     entry: entry,
                     now: now,
-                    staleAfterSeconds: staleAfterSeconds
+                    staleAfterSeconds: staleAfterSeconds,
+                    selection: selection
                 ))
         }
         return publications
@@ -47,38 +53,68 @@ public struct HomeAssistantMQTTPlanner: Sendable {
     public func reconnectPublications(
         entries: [StoredSnapshot],
         now: Date,
-        staleAfterSeconds: Int
+        staleAfterSeconds: Int,
+        selection: PublicationSelection = .all
     ) throws -> [MQTTPublication] {
         try snapshotPublications(
             entries: entries,
             now: now,
             staleAfterSeconds: staleAfterSeconds,
-            includeDiscovery: true
+            includeDiscovery: true,
+            selection: selection
         )
     }
 
     public func homeAssistantBirthPublications(
         entries: [StoredSnapshot],
         now: Date,
-        staleAfterSeconds: Int
+        staleAfterSeconds: Int,
+        selection: PublicationSelection = .all
     ) throws -> [MQTTPublication] {
         try snapshotPublications(
             entries: entries,
             now: now,
             staleAfterSeconds: staleAfterSeconds,
-            includeDiscovery: true
+            includeDiscovery: true,
+            selection: selection
         ).filter { $0.topic != "\(topicPrefix)/availability" }
     }
 
-    public func removalPublications(for snapshot: AccountSnapshot) throws -> [MQTTPublication] {
+    public func removalPublications(
+        for snapshot: AccountSnapshot,
+        selection: PublicationSelection = .all
+    ) throws -> [MQTTPublication] {
         var publications = [
             MQTTPublication(topic: stateTopic(for: snapshot.id), payload: Data())
         ]
         publications.append(
-            contentsOf: metricDescriptors(for: snapshot).map {
+            contentsOf: metricDescriptors(for: snapshot, selection: selection).map {
                 MQTTPublication(topic: discoveryTopic(for: $0.uniqueID), payload: Data())
             })
         return publications
+    }
+
+    public func advertisedTopics(
+        entries: [StoredSnapshot],
+        selection: PublicationSelection = .all
+    ) -> Set<String> {
+        var topics: Set<String> = []
+        for entry in entries where selection.includes(accountID: entry.snapshot.id) {
+            topics.insert(stateTopic(for: entry.snapshot.id))
+            for metric in metricDescriptors(for: entry.snapshot, selection: selection) {
+                topics.insert(discoveryTopic(for: metric.uniqueID))
+            }
+        }
+        return topics
+    }
+
+    public func staleTopicPublications(
+        previouslyAdvertised: Set<String>,
+        currentlyAdvertised: Set<String>
+    ) -> [MQTTPublication] {
+        previouslyAdvertised.subtracting(currentlyAdvertised).sorted().map {
+            MQTTPublication(topic: $0, payload: Data())
+        }
     }
 
     public func availabilityPublication(online: Bool) -> MQTTPublication {
@@ -91,12 +127,14 @@ public struct HomeAssistantMQTTPlanner: Sendable {
     private func statePublication(
         entry: StoredSnapshot,
         now: Date,
-        staleAfterSeconds: Int
+        staleAfterSeconds: Int,
+        selection: PublicationSelection
     ) throws -> MQTTPublication {
         let value = PublicSensorAccount(
             entry: entry,
             now: now,
-            staleAfterSeconds: staleAfterSeconds
+            staleAfterSeconds: staleAfterSeconds,
+            selection: selection
         )
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
@@ -107,8 +145,11 @@ public struct HomeAssistantMQTTPlanner: Sendable {
         )
     }
 
-    private func discoveryPublications(for snapshot: AccountSnapshot) throws -> [MQTTPublication] {
-        try metricDescriptors(for: snapshot).map { metric in
+    private func discoveryPublications(
+        for snapshot: AccountSnapshot,
+        selection: PublicationSelection
+    ) throws -> [MQTTPublication] {
+        try metricDescriptors(for: snapshot, selection: selection).map { metric in
             let payload = DiscoveryPayload(
                 name: "\(snapshot.label) \(metric.name)",
                 uniqueID: metric.uniqueID,
@@ -134,33 +175,51 @@ public struct HomeAssistantMQTTPlanner: Sendable {
         }
     }
 
-    private func metricDescriptors(for snapshot: AccountSnapshot) -> [MetricDescriptor] {
+    private func metricDescriptors(
+        for snapshot: AccountSnapshot,
+        selection: PublicationSelection
+    ) -> [MetricDescriptor] {
         var metrics: [MetricDescriptor] = []
         for (index, quota) in snapshot.quotas.enumerated() {
             let base = identifier("quota_\(quota.id)")
-            metrics.append(
-                .init(
-                    uniqueID: uniqueID(snapshot.id, "\(base)_used"),
-                    name: "\(quota.name ?? quota.id) used",
-                    valueTemplate: "{{ value_json.quotas[\(index)].usedPercent }}",
-                    unit: "%"
-                ))
-            metrics.append(
-                .init(
-                    uniqueID: uniqueID(snapshot.id, "\(base)_remaining"),
-                    name: "\(quota.name ?? quota.id) remaining",
-                    valueTemplate: "{{ value_json.quotas[\(index)].remainingPercent }}",
-                    unit: "%"
-                ))
-            metrics.append(
-                .init(
-                    uniqueID: uniqueID(snapshot.id, "\(base)_resets_at"),
-                    name: "\(quota.name ?? quota.id) resets at",
-                    valueTemplate: "{{ value_json.quotas[\(index)].resetsAt }}",
-                    unit: nil
-                ))
+            if selection.includes(.quotaUsed) {
+                metrics.append(
+                    .init(
+                        uniqueID: uniqueID(snapshot.id, "\(base)_used"),
+                        name: "\(quota.name ?? quota.id) used",
+                        valueTemplate: "{{ value_json.quotas[\(index)].usedPercent }}",
+                        unit: "%"
+                    ))
+            }
+            if selection.includes(.quotaRemaining) {
+                metrics.append(
+                    .init(
+                        uniqueID: uniqueID(snapshot.id, "\(base)_remaining"),
+                        name: "\(quota.name ?? quota.id) remaining",
+                        valueTemplate: "{{ value_json.quotas[\(index)].remainingPercent }}",
+                        unit: "%"
+                    ))
+            }
+            if selection.includes(.quotaWindowDuration) {
+                metrics.append(
+                    .init(
+                        uniqueID: uniqueID(snapshot.id, "\(base)_window_minutes"),
+                        name: "\(quota.name ?? quota.id) window",
+                        valueTemplate: "{{ value_json.quotas[\(index)].windowDurationMinutes }}",
+                        unit: "min"
+                    ))
+            }
+            if selection.includes(.quotaResetsAt) {
+                metrics.append(
+                    .init(
+                        uniqueID: uniqueID(snapshot.id, "\(base)_resets_at"),
+                        name: "\(quota.name ?? quota.id) resets at",
+                        valueTemplate: "{{ value_json.quotas[\(index)].resetsAt }}",
+                        unit: nil
+                    ))
+            }
         }
-        if snapshot.resetCredits != nil {
+        if snapshot.resetCredits != nil, selection.includes(.resetCredits) {
             metrics.append(
                 .init(
                     uniqueID: uniqueID(snapshot.id, "reset_credits"),
@@ -171,9 +230,12 @@ public struct HomeAssistantMQTTPlanner: Sendable {
         }
         for (index, balance) in snapshot.balances.enumerated() {
             let currency = identifier(balance.currency.lowercased())
-            for (field, name) in [
-                ("total", "total"), ("granted", "granted"), ("toppedUp", "topped up"),
+            for (field, name, publishedField) in [
+                ("total", "total", PublishedSensorField.balanceTotal),
+                ("granted", "granted", .balanceGranted),
+                ("toppedUp", "topped up", .balanceToppedUp),
             ] {
+                guard selection.includes(publishedField) else { continue }
                 metrics.append(
                     .init(
                         uniqueID: uniqueID(

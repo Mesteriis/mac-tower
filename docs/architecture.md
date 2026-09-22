@@ -45,7 +45,7 @@ This design is appropriate for a local OSS build, not a substitute for Developer
 
 HTTP routing is read-only and testable independently from NIO. Only `/health`, `/v1/accounts`, and `/v1/sensors` accept `GET`; the peer address must match an explicit local IPv4 CIDR. HTTP and MQTT are disabled by default.
 
-MQTT uses retained availability and account state, Home Assistant Discovery, a last will, reconnect attempts, and a subscription to `homeassistant/status` for Discovery replay. Removing an account produces retained empty state and Discovery payloads on the next collection cycle. TLS uses MQTTNIO's client configuration with full certificate and hostname verification.
+MQTT uses retained availability and account state, Home Assistant Discovery, a last will, reconnect attempts, and a subscription to `homeassistant/status` for Discovery replay. A durable ledger records only successfully advertised topics; every publication reconciles it with the current account/field selection, so removals and deselections remain pending across broker outages and daemon restarts until their retained tombstones succeed. TLS uses MQTTNIO's client configuration with full certificate and hostname verification.
 
 Public models contain stable account ID, provider, user label, source, provider observation time, freshness, last collection attempt/failure, and only the supported quota or balance fields. Optional means unknown or unavailable; it is not encoded as zero.
 

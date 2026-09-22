@@ -57,6 +57,17 @@ final class DaemonClient: ObservableObject {
         return url
     }
 
+    func cancelCodexOAuth(id: AccountID) async {
+        await run {
+            _ = try await self.perform(
+                operation: .cancelCodexOAuth,
+                payload: CancelCodexOAuthRequest(id: id),
+                response: EmptyResponse.self
+            )
+            try await self.loadStatus()
+        }
+    }
+
     func linkClaude(
         id: String,
         label: String,
@@ -64,25 +75,33 @@ final class DaemonClient: ObservableObject {
         snapshotPath: String
     ) async {
         await run {
+            let installer = ClaudeStatuslineInstaller()
+            let configURL = URL(fileURLWithPath: configDirectory, isDirectory: true)
+            let previousState = try installer.captureState(configDirectory: configURL)
             let snapshotURL = URL(fileURLWithPath: snapshotPath).standardizedFileURL
-            let installedSnapshot = try ClaudeStatuslineInstaller().install(
-                configDirectory: URL(fileURLWithPath: configDirectory, isDirectory: true),
+            let installedSnapshot = try installer.install(
+                configDirectory: configURL,
                 accountID: AccountID(id),
                 label: label,
                 outputDirectory: snapshotURL.deletingLastPathComponent(),
                 bridgeURL: URL(
                     fileURLWithPath: "/Library/PrivilegedHelperTools/mac-tower-claude-bridge")
             )
-            guard installedSnapshot == snapshotURL else {
-                throw AccountRegistrationError.invalidPath
+            do {
+                guard installedSnapshot == snapshotURL else {
+                    throw AccountRegistrationError.invalidPath
+                }
+                let request = try LinkClaudeProfileRequest(
+                    id: AccountID(id), label: label, snapshotPath: snapshotPath)
+                _ = try await self.perform(
+                    operation: .linkClaudeProfile,
+                    payload: request,
+                    response: EmptyResponse.self
+                )
+            } catch let operationError {
+                try installer.restore(previousState, configDirectory: configURL)
+                throw operationError
             }
-            let request = try LinkClaudeProfileRequest(
-                id: AccountID(id), label: label, snapshotPath: snapshotPath)
-            _ = try await self.perform(
-                operation: .linkClaudeProfile,
-                payload: request,
-                response: EmptyResponse.self
-            )
             try await self.loadStatus()
         }
     }

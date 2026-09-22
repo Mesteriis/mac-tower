@@ -141,6 +141,73 @@ struct PublicationTests {
             })
     }
 
+    @Test("Publication selection filters accounts and individual fields")
+    func publicationSelection() async throws {
+        let selection = try PublicationSelection(
+            accountIDs: [sampleSnapshot.id],
+            fields: [.balanceTotal]
+        )
+        let store = SnapshotStore()
+        await store.recordSuccess(sampleSnapshot, attemptedAt: now)
+        await store.recordSuccess(
+            AccountSnapshot(
+                id: AccountID("other"),
+                provider: .deepSeek,
+                label: "Other",
+                status: .available,
+                source: .deepSeekAPI,
+                observedAt: now
+            ),
+            attemptedAt: now
+        )
+        let router = SensorHTTPRouter(
+            store: store,
+            allowedNetworks: [try IPv4CIDR("127.0.0.0/8")],
+            staleAfterSeconds: 900,
+            selection: selection
+        )
+        let response = await router.handle(
+            .init(method: "GET", path: "/v1/sensors", peerAddress: "127.0.0.1"),
+            now: now
+        )
+        let json = String(decoding: response.body, as: UTF8.self)
+        #expect(json.contains("deepseek-main"))
+        #expect(!json.contains(#"\"id\":\"other\""#))
+        #expect(json.contains(#""total""#))
+        #expect(!json.contains(#""granted""#))
+        #expect(!json.contains(#""toppedUp""#))
+
+        let planner = HomeAssistantMQTTPlanner(topicPrefix: "mac_tower")
+        let entries = [
+            StoredSnapshot(snapshot: sampleSnapshot, lastAttemptAt: now, lastFailure: nil)
+        ]
+        let publications = try planner.snapshotPublications(
+            entries: entries,
+            now: now,
+            staleAfterSeconds: 900,
+            includeDiscovery: true,
+            selection: selection
+        )
+        #expect(publications.contains { $0.topic.contains("balance_usd_total") })
+        #expect(!publications.contains { $0.topic.contains("balance_usd_granted") })
+    }
+
+    @Test("MQTT reconciliation retains tombstones until a successful advertisement commit")
+    func mqttTopicReconciliation() throws {
+        let planner = HomeAssistantMQTTPlanner(topicPrefix: "mac_tower")
+        let previous: Set<String> = [
+            "mac_tower/accounts/deleted/state",
+            "homeassistant/sensor/mac_tower_deleted_quota/config",
+        ]
+        let current: Set<String> = ["mac_tower/accounts/current/state"]
+        let tombstones = planner.staleTopicPublications(
+            previouslyAdvertised: previous,
+            currentlyAdvertised: current
+        )
+        #expect(tombstones.count == 2)
+        #expect(tombstones.allSatisfy { $0.payload.isEmpty && $0.retain })
+    }
+
     private var sampleSnapshot: AccountSnapshot {
         AccountSnapshot(
             id: AccountID("deepseek-main"),

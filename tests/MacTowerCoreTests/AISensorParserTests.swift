@@ -181,4 +181,34 @@ struct AISensorParserTests {
             )
         }
     }
+
+    @Test("Empty or out-of-range quota payloads are rejected")
+    func invalidQuotaPayloads() {
+        #expect(throws: SensorParsingError.self) {
+            try CodexRateLimitsParser().parse(
+                Data(#"{"rateLimitsByLimitId":{}}"#.utf8),
+                accountID: AccountID("codex-empty"),
+                label: "Empty",
+                observedAt: observedAt
+            )
+        }
+        #expect(throws: SensorParsingError.self) {
+            try ClaudeStatuslineParser().parse(
+                Data(#"{"rate_limits":{}}"#.utf8),
+                accountID: AccountID("claude-empty"),
+                label: "Empty",
+                observedAt: observedAt
+            )
+        }
+        #expect(throws: SensorParsingError.self) {
+            try ClaudeStatuslineParser().parse(
+                Data(
+                    #"{"rate_limits":{"five_hour":{"used_percentage":101,"resets_at":1800003600}}}"#
+                        .utf8),
+                accountID: AccountID("claude-invalid"),
+                label: "Invalid",
+                observedAt: observedAt
+            )
+        }
+    }
 }

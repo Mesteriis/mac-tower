@@ -13,6 +13,7 @@ actor ManagementController {
     private var configuration: ServiceConfiguration
     private var codexSessions: [AccountID: CodexAccountSession] = [:]
     private var activeLoginAccount: AccountID?
+    private var activeLoginTimeoutTask: Task<Void, Never>?
     private var snapshotStore: SnapshotStore?
 
     init(root: URL) throws {
@@ -32,7 +33,8 @@ actor ManagementController {
             httpEnabled: configuration.http.enabled,
             mqttEnabled: configuration.mqtt.enabled,
             configuration: configuration,
-            accounts: await registry.all()
+            accounts: await registry.all(),
+            activeCodexOAuthAccountID: activeLoginAccount
         )
     }
 
@@ -41,7 +43,10 @@ actor ManagementController {
             configuration: request.configuration,
             mqttPassword: request.mqttPassword
         )
-        var replacement = validated.configuration
+        var replacement = validated.configuration.applyingMQTTSecretPolicy(
+            existingSecretName: configuration.mqtt.passwordSecretName,
+            replacementPassword: validated.mqttPassword
+        )
         if let password = validated.mqttPassword {
             if password.isEmpty {
                 try storage.remove(named: "mqtt-password")
@@ -102,16 +107,39 @@ actor ManagementController {
         )
         let session = try codexSession(for: account)
         do {
-            return try await session.startLogin()
+            let result = try await session.startLogin()
+            activeLoginTimeoutTask?.cancel()
+            activeLoginTimeoutTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(600), clock: .continuous)
+                } catch {
+                    return
+                }
+                await self?.expireLogin(for: request.id)
+            }
+            return result
         } catch {
-            activeLoginAccount = nil
+            completeLogin(for: request.id)
             throw error
         }
     }
 
+    func cancelCodexOAuth(_ request: CancelCodexOAuthRequest) async {
+        guard activeLoginAccount == request.id else { return }
+        if let session = codexSessions[request.id] {
+            await session.stop()
+        }
+        completeLogin(for: request.id)
+    }
+
     func removeAccount(_ request: RemoveAccountRequest) async throws {
+        let account = await registry.all().first { $0.id == request.id }
+        completeLogin(for: request.id)
         if let session = codexSessions.removeValue(forKey: request.id) {
             await session.stop()
+        }
+        if account?.provider == .codex {
+            try ManagedAccountPaths(root: codexRoot).removeDirectory(for: request.id)
         }
         if let account = try await registry.remove(id: request.id),
             let secret = account.deepSeekSecretName
@@ -157,6 +185,8 @@ actor ManagementController {
         let sessions = codexSessions.values
         codexSessions.removeAll()
         activeLoginAccount = nil
+        activeLoginTimeoutTask?.cancel()
+        activeLoginTimeoutTask = nil
         for session in sessions { await session.stop() }
     }
 
@@ -203,12 +233,16 @@ actor ManagementController {
                 binaryURL: URL(fileURLWithPath: "/Library/PrivilegedHelperTools/mac-tower-codex"),
                 homeURL: home,
                 managedAccountsRoot: codexRoot
-            )
-        ) { [weak self] message in
-            Task {
-                await self?.handleCodexNotification(for: account.id, message: message)
+            ),
+            notificationHandler: { [weak self] message in
+                Task {
+                    await self?.handleCodexNotification(for: account.id, message: message)
+                }
+            },
+            terminationHandler: { [weak self] in
+                Task { await self?.codexSessionTerminated(for: account.id) }
             }
-        }
+        )
         codexSessions[account.id] = session
         return session
     }
@@ -245,6 +279,7 @@ actor ManagementController {
             switch error {
             case .rpc: return .authorization
             case .invalidResponse: return .malformedResponse
+            case .timeout: return .transport
             }
         }
         if error is SensorParsingError || error is ClaudeSnapshotFileError {
@@ -254,7 +289,21 @@ actor ManagementController {
     }
 
     private func completeLogin(for id: AccountID) {
-        if activeLoginAccount == id { activeLoginAccount = nil }
+        if activeLoginAccount == id {
+            activeLoginAccount = nil
+            activeLoginTimeoutTask?.cancel()
+            activeLoginTimeoutTask = nil
+        }
+    }
+
+    private func expireLogin(for id: AccountID) async {
+        guard activeLoginAccount == id else { return }
+        if let session = codexSessions[id] { await session.stop() }
+        completeLogin(for: id)
+    }
+
+    private func codexSessionTerminated(for id: AccountID) {
+        completeLogin(for: id)
     }
 
     private func handleCodexNotification(

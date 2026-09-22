@@ -34,6 +34,20 @@ then
     exit 1
 fi
 
+preflight_root="$(mktemp -d "${TMPDIR:-/tmp}/mactower-install-preflight.XXXXXX")"
+trap 'rm -rf "$preflight_root"' EXIT
+mkdir -p "$preflight_root/MacTower.app"
+cp /usr/bin/true "$preflight_root/daemon"
+cp /usr/bin/true "$preflight_root/bridge"
+cp /usr/bin/true "$preflight_root/codex"
+preflight_output="$($install_script --preflight \
+    --app "$preflight_root/MacTower.app" \
+    --daemon "$preflight_root/daemon" \
+    --bridge "$preflight_root/bridge" \
+    --codex "$preflight_root/codex" \
+    --owner-uid "$(id -u)")"
+grep -q 'preflight: installation artifacts and paths are valid' <<<"$preflight_output"
+
 uninstall_output="$($uninstall_script --dry-run)"
 grep -q 'preserve /Library/Application Support/MacTower' <<<"$uninstall_output"
 grep -q 'dry-run: no files changed' <<<"$uninstall_output"

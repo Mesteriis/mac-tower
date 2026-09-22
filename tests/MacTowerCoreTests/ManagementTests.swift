@@ -84,6 +84,9 @@ struct ManagementTests {
             try MQTTServiceConfiguration(enabled: true, host: "", port: 1883)
         }
         #expect(throws: ServiceConfigurationError.self) {
+            try MQTTServiceConfiguration(enabled: true, host: "broker.example.com", port: 8883)
+        }
+        #expect(throws: ServiceConfigurationError.self) {
             try MQTTServiceConfiguration(
                 enabled: true,
                 host: "broker.local",
@@ -205,5 +208,116 @@ struct ManagementTests {
         #expect(
             !FileManager.default.fileExists(
                 atPath: root.appending(path: "mactower-statusline.sh").path))
+    }
+
+    @Test("Claude restore refuses to overwrite a newer statusline")
+    func claudeRestoreConflict() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = ClaudeStatuslineInstaller()
+        _ = try installer.install(
+            configDirectory: root,
+            accountID: AccountID("claude-main"),
+            label: "Main",
+            outputDirectory: root.appending(path: "snapshots"),
+            bridgeURL: URL(fileURLWithPath: "/bin/true")
+        )
+        let changed: [String: Any] = [
+            "statusLine": ["type": "command", "command": "printf newer"]
+        ]
+        try JSONSerialization.data(withJSONObject: changed)
+            .write(to: root.appending(path: "settings.json"))
+
+        #expect(throws: ClaudeStatuslineInstallerError.statuslineChanged) {
+            try installer.install(
+                configDirectory: root,
+                accountID: AccountID("claude-main"),
+                label: "Main",
+                outputDirectory: root.appending(path: "snapshots"),
+                bridgeURL: URL(fileURLWithPath: "/bin/true")
+            )
+        }
+        #expect(throws: ClaudeStatuslineInstallerError.statuslineChanged) {
+            try installer.uninstall(configDirectory: root)
+        }
+        let persisted = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: root.appending(path: "settings.json"))) as? [String: Any]
+        )
+        #expect(
+            (persisted["statusLine"] as? [String: Any])?["command"] as? String
+                == "printf newer")
+    }
+
+    @Test("A failed Claude profile update can restore the previous bridge")
+    func claudeUpdateRollback() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let installer = ClaudeStatuslineInstaller()
+        _ = try installer.install(
+            configDirectory: root,
+            accountID: AccountID("claude-first"),
+            label: "First",
+            outputDirectory: root.appending(path: "first"),
+            bridgeURL: URL(fileURLWithPath: "/bin/true")
+        )
+        let wrapperURL = root.appending(path: "mactower-statusline.sh")
+        let originalWrapper = try Data(contentsOf: wrapperURL)
+        let previousState = try installer.captureState(configDirectory: root)
+
+        _ = try installer.install(
+            configDirectory: root,
+            accountID: AccountID("claude-second"),
+            label: "Second",
+            outputDirectory: root.appending(path: "second"),
+            bridgeURL: URL(fileURLWithPath: "/bin/true")
+        )
+        #expect(try Data(contentsOf: wrapperURL) != originalWrapper)
+
+        try installer.restore(previousState, configDirectory: root)
+        #expect(try Data(contentsOf: wrapperURL) == originalWrapper)
+    }
+
+    @Test("MQTT secret references survive settings saves without a replacement password")
+    func mqttSecretPolicy() throws {
+        let configuration = try ServiceConfiguration(
+            mqtt: MQTTServiceConfiguration(
+                enabled: true,
+                host: "broker.local",
+                port: 8883,
+                useTLS: true
+            ))
+        let preserved = configuration.applyingMQTTSecretPolicy(
+            existingSecretName: "mqtt-password",
+            replacementPassword: nil
+        )
+        let cleared = configuration.applyingMQTTSecretPolicy(
+            existingSecretName: "mqtt-password",
+            replacementPassword: ""
+        )
+        #expect(preserved.mqtt.passwordSecretName == "mqtt-password")
+        #expect(cleared.mqtt.passwordSecretName == nil)
+    }
+
+    @Test("Removing a managed Codex directory cannot escape its root")
+    func managedAccountRemoval() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ManagedAccountPaths(root: root)
+        let account = AccountID("codex-personal")
+        let directory = try paths.directory(for: account)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("secret".utf8).write(to: directory.appending(path: "auth.json"))
+
+        try paths.removeDirectory(for: account)
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+        #expect(throws: ServiceConfigurationError.invalidAccountID) {
+            try paths.removeDirectory(for: AccountID("../escape"))
+        }
     }
 }

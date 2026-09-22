@@ -18,11 +18,12 @@ public struct ClaudeStatuslineParser: Sendable {
 
         var quotas: [QuotaWindow] = []
         if let fiveHour = response.rateLimits.fiveHour {
-            quotas.append(fiveHour.quota(id: "five_hour", minutes: 300))
+            quotas.append(try fiveHour.quota(id: "five_hour", minutes: 300))
         }
         if let sevenDay = response.rateLimits.sevenDay {
-            quotas.append(sevenDay.quota(id: "seven_day", minutes: 10_080))
+            quotas.append(try sevenDay.quota(id: "seven_day", minutes: 10_080))
         }
+        guard !quotas.isEmpty else { throw SensorParsingError.invalidPayload }
 
         return AccountSnapshot(
             id: accountID,
@@ -64,8 +65,13 @@ extension ClaudeStatuslineParser {
             case resetsAt = "resets_at"
         }
 
-        func quota(id: String, minutes: Int) -> QuotaWindow {
-            QuotaWindow(
+        func quota(id: String, minutes: Int) throws -> QuotaWindow {
+            guard usedPercentage.isFinite, (0...100).contains(usedPercentage),
+                resetsAt.isFinite, resetsAt > 0
+            else {
+                throw SensorParsingError.invalidPayload
+            }
+            return QuotaWindow(
                 id: id,
                 name: nil,
                 usedPercent: usedPercentage,

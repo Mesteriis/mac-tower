@@ -5,6 +5,7 @@ public enum ManagementOperation: String, Codable, Sendable {
     case replaceConfiguration = "replace_configuration"
     case addDeepSeekAccount = "add_deepseek_account"
     case startCodexOAuth = "start_codex_oauth"
+    case cancelCodexOAuth = "cancel_codex_oauth"
     case linkClaudeProfile = "link_claude_profile"
     case removeAccount = "remove_account"
 }
@@ -182,6 +183,14 @@ public struct RemoveAccountRequest: Codable, Sendable {
     }
 }
 
+public struct CancelCodexOAuthRequest: Codable, Sendable {
+    public let id: AccountID
+
+    public init(id: AccountID) {
+        self.id = id
+    }
+}
+
 public struct CodexOAuthStart: Codable, Sendable {
     public let loginID: String
     public let authorizationURL: URL
@@ -198,19 +207,22 @@ public struct DaemonStatus: Codable, Sendable {
     public let mqttEnabled: Bool
     public let configuration: ServiceConfiguration
     public let accounts: [AccountRegistration]
+    public let activeCodexOAuthAccountID: AccountID?
 
     public init(
         running: Bool,
         httpEnabled: Bool,
         mqttEnabled: Bool,
         configuration: ServiceConfiguration,
-        accounts: [AccountRegistration]
+        accounts: [AccountRegistration],
+        activeCodexOAuthAccountID: AccountID? = nil
     ) {
         self.running = running
         self.httpEnabled = httpEnabled
         self.mqttEnabled = mqttEnabled
         self.configuration = configuration
         self.accounts = accounts
+        self.activeCodexOAuthAccountID = activeCodexOAuthAccountID
     }
 }
 
