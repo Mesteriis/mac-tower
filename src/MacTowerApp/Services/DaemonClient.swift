@@ -25,6 +25,7 @@ final class DaemonClient: ObservableObject {
     @Published private(set) var powerPresentation = PowerModePresentationState()
     @Published var errorMessage: String?
     @Published private(set) var notificationHistory: [NotificationRecord] = []
+    @Published private(set) var notificationHistoryNextCursor: NotificationHistoryCursor?
     @Published private(set) var panelPairingStatus: NSPanelPairingStatus?
     private let replies = XPCReplyLedger()
 
@@ -188,14 +189,25 @@ final class DaemonClient: ObservableObject {
         }
     }
 
-    func loadNotificationHistory(limit: Int = 50, before: NotificationHistoryCursor? = nil) async {
+    func loadNotificationHistory(
+        limit: Int = 50,
+        before: NotificationHistoryCursor? = nil,
+        append: Bool = false
+    ) async {
         await run {
             let page = try await self.perform(
                 operation: .notificationHistory,
                 payload: try NotificationHistoryRequest(limit: limit, before: before),
                 response: NotificationHistoryPage.self
             )
-            self.notificationHistory = page.records
+            if append {
+                let known = Set(self.notificationHistory.map(\.event.eventID))
+                self.notificationHistory.append(
+                    contentsOf: page.records.filter { !known.contains($0.event.eventID) })
+            } else {
+                self.notificationHistory = page.records
+            }
+            self.notificationHistoryNextCursor = page.nextCursor
         }
     }
 

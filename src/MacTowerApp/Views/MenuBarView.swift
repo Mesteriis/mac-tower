@@ -5,6 +5,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @Environment(\.openSettings) private var openSettings
+    @AppStorage("settingsTab") private var selectedSettingsTab = "accounts"
     @ObservedObject var daemon: DaemonClient
     @ObservedObject var windows: WindowController
 
@@ -16,6 +17,37 @@ struct MenuBarView: View {
         if let accounts = daemon.status?.accounts {
             Text("AI accounts: \(accounts.count)")
                 .foregroundStyle(.secondary)
+        }
+
+        if let notifications = daemon.status?.notificationSummary {
+            Text(
+                shortTitle(
+                    NotificationPresentation.activeCriticalLabel(
+                        notifications.engine.activeCriticalCount))
+            )
+            .foregroundStyle(
+                notifications.engine.activeCriticalCount > 0 ? .red : .secondary)
+            ForEach(
+                Array(notifications.engine.recentRecords.prefix(3)),
+                id: \.event.eventID
+            ) { record in
+                if record.isActive && record.event.severity == .critical {
+                    Button(shortTitle("Ack: \(record.event.title)")) {
+                        Task {
+                            await daemon.acknowledgeNotification(
+                                eventID: record.event.eventID)
+                        }
+                    }
+                } else {
+                    Text(shortTitle(record.event.title))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Button("Open Notifications…") {
+                selectedSettingsTab = "notifications"
+                NSApp.activate(ignoringOtherApps: true)
+                openSettings()
+            }
         }
 
         Divider()

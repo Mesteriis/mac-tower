@@ -5,21 +5,33 @@ import SwiftUI
 
 struct SettingsView: View {
     @AppStorage("showMenuBarTitle") private var showMenuBarTitle = false
+    @AppStorage("settingsTab") private var selectedTab = "accounts"
     @ObservedObject var daemon: DaemonClient
     @ObservedObject var windows: WindowController
     @ObservedObject var windowBridge: WindowAgentBridge
     @ObservedObject var loginItem: LoginItemController
+    @ObservedObject var macNotifications: MacNotificationController
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             AccountsSettingsView(daemon: daemon)
                 .tabItem { Label("Accounts", systemImage: "person.2") }
+                .tag("accounts")
 
             NetworkSettingsView(daemon: daemon)
                 .tabItem { Label("Publishing", systemImage: "network") }
+                .tag("publishing")
+
+            NotificationsSettingsView(
+                daemon: daemon,
+                macNotifications: macNotifications
+            )
+            .tabItem { Label("Notifications", systemImage: "bell") }
+            .tag("notifications")
 
             WindowsSettingsView(windows: windows, bridge: windowBridge, loginItem: loginItem)
                 .tabItem { Label("Windows", systemImage: "macwindow") }
+                .tag("windows")
 
             Form {
                 PowerSettingsView(daemon: daemon)
@@ -38,11 +50,13 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
+            .tag("general")
 
             AboutView()
                 .tabItem { Label("About", systemImage: "info.circle") }
+                .tag("about")
         }
-        .frame(width: 720, height: 590)
+        .frame(width: 880, height: 700)
         .task { await daemon.refresh() }
     }
 }
