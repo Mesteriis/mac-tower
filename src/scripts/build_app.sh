@@ -25,5 +25,5 @@ cp src/Resources/Info.plist "$app_bundle/Contents/Info.plist"
 chmod 755 "$app_bundle/Contents/MacOS/MacTower"
 /usr/bin/plutil -lint "$app_bundle/Contents/Info.plist"
 # Local development signature only; distribution requires Developer ID signing.
-/usr/bin/codesign --force --sign - "$app_bundle"
+/usr/bin/codesign --force --sign - --options runtime --timestamp=none "$app_bundle"
 printf 'Built %s\n' "$app_bundle"

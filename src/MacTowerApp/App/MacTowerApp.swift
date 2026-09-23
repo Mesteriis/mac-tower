@@ -7,7 +7,10 @@ struct MacTowerApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView()
+            MenuBarView(
+                daemon: appDelegate.services.daemon,
+                windows: appDelegate.services.windows
+            )
         } label: {
             if showMenuBarTitle {
                 Label("MacTower", systemImage: "antenna.radiowaves.left.and.right")
@@ -19,7 +22,13 @@ struct MacTowerApp: App {
         .menuBarExtraStyle(.menu)
 
         Settings {
-            SettingsView()
+            SettingsView(
+                daemon: appDelegate.services.daemon,
+                windows: appDelegate.services.windows,
+                windowBridge: appDelegate.services.windowBridge,
+                loginItem: appDelegate.services.loginItem,
+                macNotifications: appDelegate.services.notifications
+            )
         }
     }
 }

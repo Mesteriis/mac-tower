@@ -1,0 +1,81 @@
+blueprint:
+  name: MacTower panel notifications
+  description: >-
+    Forwards MacTower panel events to a selected notify action and publishes
+    explicit acknowledgements back to MacTower.
+  domain: automation
+  input:
+    panel_topic:
+      name: Panel event topic
+      selector:
+        text: {}
+    ack_topic:
+      name: Acknowledgement topic
+      selector:
+        text: {}
+    notify_action:
+      name: Notify action
+      description: For example, notify.mobile_app_your_panel.
+      selector:
+        text: {}
+
+triggers:
+  - trigger: mqtt
+    topic: !input panel_topic
+    id: notification
+  - trigger: event
+    event_type: mobile_app_notification_action
+    id: acknowledgement
+
+conditions: []
+
+actions:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'notification'
+                 and ((trigger.payload_json.event_id | default(''))
+                   | regex_match('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')) }}
+        sequence:
+          - action: !input notify_action
+            data:
+              title: "{{ trigger.payload_json.title | default('MacTower') }}"
+              message: "{{ trigger.payload_json.message | default('') }}"
+              data:
+                tag: "{{ trigger.payload_json.event_id }}"
+                actions: >-
+                  {{
+                    [{
+                      "action": "MACTOWER_ACK_" ~ trigger.payload_json.event_id,
+                      "title": "Acknowledge"
+                    }]
+                    if trigger.payload_json.severity == 'critical'
+                       and trigger.payload_json.acknowledgement_enabled | default(false)
+                    else []
+                  }}
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ trigger.id == 'acknowledgement'
+                 and ((trigger.event.data.action | default(''))
+                   | regex_match('^MACTOWER_ACK_[0-9a-fA-F-]{36}$')) }}
+        sequence:
+          - variables:
+              event_id: >-
+                {{ (trigger.event.data.action | default(''))
+                   | replace('MACTOWER_ACK_', '') }}
+          - condition: template
+            value_template: >-
+              {{ event_id
+                 | regex_match('^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') }}
+          - action: mqtt.publish
+            data:
+              topic: !input ack_topic
+              qos: 1
+              retain: false
+              payload: >-
+                {{ {"schema_version": 1, "event_id": event_id} | to_json }}
+
+mode: queued
+max: 20
